@@ -80,35 +80,47 @@ def convert_to_wav(input_path, output_path=None):
     except subprocess.CalledProcessError as e:
         logger.error(f"FFmpeg conversion failed: {e}")
         return None
-
-# Modified download function with format conversion
+        
 def download_youtube_audio(url):
     try:
+        # Create a dedicated temp directory
+        temp_dir = tempfile.mkdtemp()
+        temp_audio_path = os.path.join(temp_dir, "audio.wav")
+        
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
+            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',  # Use WAV for better Whisper compatibility
+                'preferredquality': '192',
+            }],
             'quiet': True,
             'no_warnings': True,
             'extract_flat': True,
             'force_generic_extractor': True,
-            # Add these options:
-            'cookiefile': 'cookies.txt',  # If you have YouTube cookies
-            'referer': 'https://www.youtube.com',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'retries': 10,
-            'fragment-retries': 10,
-            'extractor-retries': 3,
-            'socket-timeout': 30,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'retries': 3,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            audio_path = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
-            return audio_path
+            original_path = ydl.prepare_filename(info)
+            
+            # Verify file exists
+            if not os.path.exists(original_path):
+                raise FileNotFoundError(f"Downloaded file not found at {original_path}")
+            
+            # Return the converted WAV file path
+            return original_path.replace('.webm', '.wav').replace('.m4a', '.wav')
+            
     except Exception as e:
-        logger.error(f"Download failed: {e}")
+        logger.error(f"Download failed: {str(e)}")
+        # Clean up temp files if they exist
+        if 'temp_dir' in locals() and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
         return None
-
+        
 def clean_text(text):
     """
     Clean text for PDF generation by:
@@ -235,26 +247,43 @@ def clean_text(text):
         text = text.encode('ascii', 'ignore').decode('ascii')
     
     return text.strip()
-
-# Modified transcribe function with better error handling
+    
 def transcribe_audio(audio_path):
-    if not audio_path or not os.path.exists(audio_path):
+    if not audio_path:
+        st.error("No audio path provided")
+        return None
+        
+    if not os.path.exists(audio_path):
         st.error(f"Audio file not found at: {audio_path}")
+        logger.error(f"Expected audio file missing: {audio_path}")
         return None
     
     try:
         # Verify file is readable
         with open(audio_path, 'rb') as f:
-            pass
-            
+            if f.read(1) == b'':  # Check if file is empty
+                st.error("Audio file is empty")
+                return None
+                
         # Load audio with Whisper
         result = model.transcribe(audio_path)
+        
+        # Clean up audio file after transcription
+        try:
+            os.unlink(audio_path)
+            temp_dir = os.path.dirname(audio_path)
+            if temp_dir.startswith(tempfile.gettempdir()):
+                shutil.rmtree(temp_dir)
+        except:
+            pass
+            
         return clean_text(result["text"])
+        
     except Exception as e:
         st.error(f"Error transcribing audio: {e}")
         logger.error(f"Transcription error: {str(e)}")
         return None
-
+        
 # Function to extract video ID from URL
 def extract_video_id(url):
     regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
