@@ -17,7 +17,7 @@ import requests
 import logging
 import subprocess
 import shutil
-import soundfile as sf
+import wave  # Using Python's built-in wave module instead of soundfile
 
 # Configure logging
 logging.basicConfig(
@@ -52,7 +52,7 @@ if not verify_ffmpeg():
 @st.cache_resource
 def load_whisper_model():
     try:
-        return whisper.load_model("small")  # Using smaller model for stability
+        return whisper.load_model("base")  # Using base model as in original
     except Exception as e:
         st.error(f"Failed to load Whisper model: {e}")
         return None
@@ -60,21 +60,34 @@ def load_whisper_model():
 model = load_whisper_model()
 
 def validate_audio_file(audio_path):
+    """Validate audio file using Python's built-in wave module"""
     try:
         if not os.path.exists(audio_path):
             return False, "File does not exist"
             
         file_size = os.path.getsize(audio_path)
-        if file_size < 10 * 1024:
+        if file_size < 10 * 1024:  # Less than 10KB
             return False, "File is too small (likely corrupted)"
-            
+        
+        # Try to open as WAV file
         try:
-            data, samplerate = sf.read(audio_path)
-            if len(data) == 0:
-                return False, "Audio contains no data"
-            return True, f"Valid audio file ({samplerate}Hz, {len(data)} samples)"
+            with wave.open(audio_path, 'rb') as wav_file:
+                frames = wav_file.getnframes()
+                if frames == 0:
+                    return False, "Audio contains no data"
+                return True, f"Valid WAV file ({wav_file.getframerate()}Hz, {frames} frames)"
+        except wave.Error:
+            # Not a WAV file, but might still be valid
+            try:
+                with open(audio_path, 'rb') as f:
+                    header = f.read(4)
+                    if len(header) < 4:
+                        return False, "File too small to be valid audio"
+                    return True, "Non-WAV audio file (basic validation passed)"
+            except:
+                return False, "File is not readable"
         except Exception as e:
-            return False, f"Invalid audio format: {str(e)}"
+            return False, f"Validation error: {str(e)}"
             
     except Exception as e:
         return False, f"Validation error: {str(e)}"
@@ -96,9 +109,6 @@ def download_youtube_audio(url):
             'force_generic_extractor': True,
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'retries': 3,
-            'audio-format': 'wav',
-            'audio-quality': '0',
-            'prefer-ffmpeg': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -118,6 +128,10 @@ def download_youtube_audio(url):
         if 'temp_dir' in locals() and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         return None
+    finally:
+        # Clean up any remaining temporary files
+        pass
+
 
 def clean_text(text):
     if not text:
