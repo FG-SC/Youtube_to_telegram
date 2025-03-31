@@ -36,18 +36,19 @@ youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=os.geten
 openai.api_key = os.getenv("OPENAI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
-
-# Verify FFmpeg installation
 def verify_ffmpeg():
     try:
-        subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(['ffmpeg', '-version'], 
+                              stdout=subprocess.PIPE, 
+                              stderr=subprocess.PIPE,
+                              text=True)
         return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except:
         return False
 
 if not verify_ffmpeg():
-    st.warning("FFmpeg is not properly installed. Some audio processing may fail.")
-
+    st.warning("FFmpeg not properly installed. Some features may not work.")
+    
 # Update your Whisper model loading:
 @st.cache_resource
 def load_whisper_model():
