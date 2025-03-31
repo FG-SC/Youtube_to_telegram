@@ -7,4 +7,3 @@ google-api-python-client==2.108.0
 fpdf2==2.7.7
 yt-dlp==2023.11.16
 requests==2.31.0
-ffmpeg-python==0.2.0
