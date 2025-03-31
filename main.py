@@ -75,51 +75,29 @@ def convert_to_wav(input_path, output_path=None):
 # Modified download function with format conversion
 def download_youtube_audio(url):
     try:
-        # Create temp directory for downloads
-        temp_dir = tempfile.mkdtemp()
-        temp_audio_path = os.path.join(temp_dir, "audio.wav")
-        
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav',
-                'preferredquality': '192',
-            }],
+            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
+            'extract_flat': True,
+            'force_generic_extractor': True,
+            # Add these options:
+            'cookiefile': 'cookies.txt',  # If you have YouTube cookies
+            'referer': 'https://www.youtube.com',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'retries': 10,
+            'fragment-retries': 10,
+            'extractor-retries': 3,
+            'socket-timeout': 30,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            original_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
-            
-            # Ensure the file exists
-            if not os.path.exists(original_path):
-                raise FileNotFoundError(f"Downloaded file not found at {original_path}")
-            
-            # Convert to proper WAV format if needed
-            converted_path = convert_to_wav(original_path, temp_audio_path)
-            
-            if not os.path.exists(converted_path):
-                raise FileNotFoundError(f"Converted file not found at {converted_path}")
-            
-            return converted_path
-            
+            audio_path = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
+            return audio_path
     except Exception as e:
         logger.error(f"Download failed: {e}")
-        try:
-            # Clean up temp files if they exist
-            if 'original_path' in locals() and os.path.exists(original_path):
-                os.unlink(original_path)
-            if 'converted_path' in locals() and os.path.exists(converted_path):
-                os.unlink(converted_path)
-            if 'temp_dir' in locals() and os.path.exists(temp_dir):
-                os.rmdir(temp_dir)
-        except:
-            pass
-        
         return None
 
 def clean_text(text):
