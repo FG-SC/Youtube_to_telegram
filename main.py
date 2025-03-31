@@ -41,15 +41,16 @@ def verify_ffmpeg():
 if not verify_ffmpeg():
     st.warning("FFmpeg is not properly installed. Some audio processing may fail.")
 
-# Initialize Whisper model with error handling
+# Update your Whisper model loading:
 @st.cache_resource
 def load_whisper_model():
     try:
-        return whisper.load_model("base")  # You can use "small", "medium", or "large" for better quality
+        # Use the tiny or small model for production
+        return whisper.load_model("tiny", device="cpu")  # or "small"
     except Exception as e:
         st.error(f"Failed to load Whisper model: {e}")
         return None
-
+        
 model = load_whisper_model()
 
 # Audio processing functions
