@@ -10,7 +10,6 @@ from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 import re
 import yt_dlp
-import requests
 import logging
 import subprocess
 
@@ -39,7 +38,7 @@ if not verify_ffmpeg():
 @st.cache_resource
 def load_whisper_model():
     try:
-        return whisper.load_model("base")  # You can use "small", "medium", or "large" for better quality
+        return whisper.load_model("tiny")  # You can use "small", "medium", or "large" for better quality
     except Exception as e:
         st.error(f"Failed to load Whisper model: {e}")
         return None
