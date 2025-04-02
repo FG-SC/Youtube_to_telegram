@@ -43,7 +43,8 @@ load_dotenv()
 
 # Initialize services
 youtube_api_key = st.secrets["YOUTUBE_API_KEY"]
-st.write(f"YOUTUBE_API_KEY loaded: {bool(st.secrets.get('YOUTUBE_API_KEY'))}")
+
+st.secrets.get('YOUTUBE_API_KEY')
 
 youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=youtube_api_key)
 openai.api_key = st.secrets["OPENAI_API_KEY"]
