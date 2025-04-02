@@ -2,7 +2,6 @@ import streamlit as st
 from pytube import YouTube
 import openai
 import os
-from dotenv import load_dotenv
 import datetime
 import googleapiclient.discovery
 import tempfile
@@ -17,16 +16,7 @@ import requests
 import logging
 import subprocess
 import shutil
-import soundfile as sf
-import asyncio
-import nest_asyncio
 
-# Patch the event loop
-try:
-    nest_asyncio.apply()
-except:
-    pass
-    
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -38,18 +28,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# Load secrets from Streamlit
+try:
+    YOUTUBE_API_KEY = st.secrets["YOUTUBE_API_KEY"]
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+    TELEGRAM_BOT_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
+    TELEGRAM_CHANNEL_ID = st.secrets["TELEGRAM_CHANNEL_ID"]
+except Exception as e:
+    st.error(f"Failed to load required secrets: {e}")
+    st.stop()
 
-# Initialize services
-youtube_api_key = st.secrets["YOUTUBE_API_KEY"]
+# Initialize services with secrets
+youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+openai.api_key = OPENAI_API_KEY
 
-youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=youtube_api_key)
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-
-# Load secret variables from Streamlit Cloud
-TELEGRAM_BOT_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHANNEL_ID = st.secrets["TELEGRAM_CHANNEL_ID"]
+# Rest of your code remains exactly the same...
+# [Keep all your existing functions unchanged]
 def verify_ffmpeg():
     try:
         subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
