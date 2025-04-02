@@ -309,138 +309,136 @@ Comments: {video_details["comments"]:,}
         return None, f"Failed to create PDF: {str(e)}"
 
 # Main Streamlit app
-def main():
-    st.title("YouTube Video to PDF Transcriber")
-    st.write("Enter a YouTube video URL to generate a PDF with its transcription and summary.")
+st.title("YouTube Video to PDF Transcriber")
+st.write("Enter a YouTube video URL to generate a PDF with its transcription and summary.")
 
-    # Initialize session state for caching results
-    if 'transcription' not in st.session_state:
-        st.session_state.transcription = None
-    if 'summary' not in st.session_state:
-        st.session_state.summary = None
-    if 'pdf_path' not in st.session_state:
-        st.session_state.pdf_path = None
-    if 'video_details' not in st.session_state:
-        st.session_state.video_details = None
-    if 'processing' not in st.session_state:
-        st.session_state.processing = False
+# Initialize session state for caching results
+if 'transcription' not in st.session_state:
+    st.session_state.transcription = None
+if 'summary' not in st.session_state:
+    st.session_state.summary = None
+if 'pdf_path' not in st.session_state:
+    st.session_state.pdf_path = None
+if 'video_details' not in st.session_state:
+    st.session_state.video_details = None
+if 'processing' not in st.session_state:
+    st.session_state.processing = False
 
-    url = st.text_input("YouTube Video URL:")
+url = st.text_input("YouTube Video URL:")
 
-    if url:
-        video_id = extract_video_id(url)
-        if not video_id:
-            st.error("Invalid YouTube URL. Please enter a valid YouTube video URL.")
-        else:
-            # Fetch video details if not already cached or if URL changed
-            if (not st.session_state.video_details or 
-                st.session_state.video_details.get('video_id') != video_id):
-                
-                with st.spinner("Fetching video details..."):
-                    video_details, error = get_video_details(video_id)
-                    
-                if video_details:
-                    st.session_state.video_details = video_details
-                else:
-                    st.error(f"Error: {error}")
+if url:
+    video_id = extract_video_id(url)
+    if not video_id:
+        st.error("Invalid YouTube URL. Please enter a valid YouTube video URL.")
+    else:
+        # Fetch video details if not already cached or if URL changed
+        if (not st.session_state.video_details or 
+            st.session_state.video_details.get('video_id') != video_id):
             
-            # Display video information
-            if st.session_state.video_details:
-                video_details = st.session_state.video_details
+            with st.spinner("Fetching video details..."):
+                video_details, error = get_video_details(video_id)
                 
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.image(video_details["thumbnail"], width=200)
-                with col2:
-                    st.subheader(video_details["title"])
-                    st.write(f"**Channel:** {video_details['channel']}")
-                    
-                    # Format the date safely
-                    try:
-                        published_date = datetime.datetime.strptime(
-                            video_details['published_at'], 
-                            '%Y-%m-%dT%H:%M:%SZ'
-                        ).strftime('%B %d, %Y')
-                    except:
-                        published_date = video_details['published_at']
-                        
-                    st.write(f"**Published:** {published_date}")
-                    st.write(f"**Views:** {video_details['views']:,}")
-                    st.write(f"**Likes:** {video_details['likes']:,}")
-                    st.write(f"**Comments:** {video_details['comments']:,}")
+            if video_details:
+                st.session_state.video_details = video_details
+            else:
+                st.error(f"Error: {error}")
+        
+        # Display video information
+        if st.session_state.video_details:
+            video_details = st.session_state.video_details
+            
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.image(video_details["thumbnail"], width=200)
+            with col2:
+                st.subheader(video_details["title"])
+                st.write(f"**Channel:** {video_details['channel']}")
                 
-                # Process button
-                if st.button("Generate Transcription PDF"):
-                    st.session_state.processing = True
+                # Format the date safely
+                try:
+                    published_date = datetime.datetime.strptime(
+                        video_details['published_at'], 
+                        '%Y-%m-%dT%H:%M:%SZ'
+                    ).strftime('%B %d, %Y')
+                except:
+                    published_date = video_details['published_at']
                     
-                    # Step 1: Download audio
-                    with st.spinner("Downloading audio (this may take a few minutes)..."):
-                        audio_path, error = download_youtube_audio(url)
+                st.write(f"**Published:** {published_date}")
+                st.write(f"**Views:** {video_details['views']:,}")
+                st.write(f"**Likes:** {video_details['likes']:,}")
+                st.write(f"**Comments:** {video_details['comments']:,}")
+            
+            # Process button
+            if st.button("Generate Transcription PDF"):
+                st.session_state.processing = True
+                
+                # Step 1: Download audio
+                with st.spinner("Downloading audio (this may take a few minutes)..."):
+                    audio_path, error = download_youtube_audio(url)
+                
+                if not audio_path:
+                    st.error(f"Error: {error}")
+                    st.session_state.processing = False
+                else:
+                    # Step 2: Transcribe audio
+                    with st.spinner("Transcribing audio..."):
+                        transcription, error = transcribe_audio(audio_path)
                     
-                    if not audio_path:
+                    if not transcription:
                         st.error(f"Error: {error}")
                         st.session_state.processing = False
                     else:
-                        # Step 2: Transcribe audio
-                        with st.spinner("Transcribing audio..."):
-                            transcription, error = transcribe_audio(audio_path)
+                        st.session_state.transcription = transcription
                         
-                        if not transcription:
-                            st.error(f"Error: {error}")
+                        # Step 3: Generate summary
+                        with st.spinner("Generating summary..."):
+                            summary, error = generate_summary(transcription)
+                        
+                        if not summary and error:
+                            st.warning(f"Summary generation issue: {error}")
+                            # Continue without summary
+                            summary = "Summary generation failed or skipped."
+                        
+                        st.session_state.summary = summary
+                        
+                        # Step 4: Create PDF
+                        with st.spinner("Creating PDF..."):
+                            pdf_path, error = create_pdf(
+                                video_details, 
+                                transcription, 
+                                summary
+                            )
+                        
+                        if not pdf_path:
+                            st.error(f"Error creating PDF: {error}")
                             st.session_state.processing = False
                         else:
-                            st.session_state.transcription = transcription
-                            
-                            # Step 3: Generate summary
-                            with st.spinner("Generating summary..."):
-                                summary, error = generate_summary(transcription)
-                            
-                            if not summary and error:
-                                st.warning(f"Summary generation issue: {error}")
-                                # Continue without summary
-                                summary = "Summary generation failed or skipped."
-                            
-                            st.session_state.summary = summary
-                            
-                            # Step 4: Create PDF
-                            with st.spinner("Creating PDF..."):
-                                pdf_path, error = create_pdf(
-                                    video_details, 
-                                    transcription, 
-                                    summary
-                                )
-                            
-                            if not pdf_path:
-                                st.error(f"Error creating PDF: {error}")
-                                st.session_state.processing = False
-                            else:
-                                st.session_state.pdf_path = pdf_path
-                                st.session_state.processing = False
+                            st.session_state.pdf_path = pdf_path
+                            st.session_state.processing = False
+            
+            # Display results if processing is complete
+            if st.session_state.transcription and st.session_state.pdf_path:
+                with open(st.session_state.pdf_path, "rb") as f:
+                    st.download_button(
+                        label="Download PDF",
+                        data=f,
+                        file_name=f"{video_details['title'][:30]}_transcription.pdf",
+                        mime="application/pdf"
+                    )
                 
-                # Display results if processing is complete
-                if st.session_state.transcription and st.session_state.pdf_path:
-                    with open(st.session_state.pdf_path, "rb") as f:
-                        st.download_button(
-                            label="Download PDF",
-                            data=f,
-                            file_name=f"{video_details['title'][:30]}_transcription.pdf",
-                            mime="application/pdf"
-                        )
-                    
-                    st.success("PDF generated successfully!")
-                    
-                    # Show transcription preview
-                    with st.expander("Transcription Preview"):
-                        st.text_area(
-                            "Transcription", 
-                            st.session_state.transcription, 
-                            height=300
-                        )
-                    
-                    # Show summary if available
-                    if st.session_state.summary:
-                        with st.expander("Summary"):
-                            st.write(st.session_state.summary)
+                st.success("PDF generated successfully!")
+                
+                # Show transcription preview
+                with st.expander("Transcription Preview"):
+                    st.text_area(
+                        "Transcription", 
+                        st.session_state.transcription, 
+                        height=300
+                    )
+                
+                # Show summary if available
+                if st.session_state.summary:
+                    with st.expander("Summary"):
+                        st.write(st.session_state.summary)
 
-if __name__ == "__main__":
-    main()
+
