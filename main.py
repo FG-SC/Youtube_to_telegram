@@ -43,13 +43,14 @@ load_dotenv()
 
 # Initialize services
 youtube_api_key = st.secrets["YOUTUBE_API_KEY"]
+st.write(f"YOUTUBE_API_KEY loaded: {bool(st.secrets.get('YOUTUBE_API_KEY'))}")
+
 youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=youtube_api_key)
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # Load secret variables from Streamlit Cloud
 TELEGRAM_BOT_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHANNEL_ID = st.secrets["TELEGRAM_CHANNEL_ID"]
-youtube
 def verify_ffmpeg():
     try:
         subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
