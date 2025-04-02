@@ -26,7 +26,7 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 # Initialize Whisper model (load it once and cache)
 @st.cache_resource
 def load_whisper_model():
-    return whisper.load_model("base")  # You can use "small", "medium", or "large" for better quality
+    return whisper.load_model("small")  # You can use "small", "medium", or "large" for better quality
 
 model = load_whisper_model()
 
