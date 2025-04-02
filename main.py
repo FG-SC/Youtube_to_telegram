@@ -105,72 +105,32 @@ def download_youtube_audio(url):
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
             },
-            'retries': 30,
-            'fragment-retries': 30,  
-            'extractor-retries': 10,
-            'socket-timeout': 60,
+            'retries': 10,
+            'fragment-retries': 10,
+            'extractor-retries': 3,
+            'socket-timeout': 30,
             'extract_flat': True,
-            'external_downloader': 'native',  # Don't use external downloaders
-            'nocheckcertificate': True,  # Skip SSL verification
-            'geo_bypass': True,  # Try to bypass geo-restrictions
-            'ignoreerrors': True,  # Continue on download errors
         }
         
-        # Try multiple download attempts
-        for attempt in range(3):
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if not info:
-                        continue
-                        
-                    original_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
-                    
-                    if os.path.exists(original_path):
-                        return original_path
-                    
-                    st.warning(f"Download attempt {attempt+1} failed. Retrying...")
-                    time.sleep(3)  # Wait before retry
-            except Exception as e:
-                logger.error(f"Download attempt {attempt+1} failed: {e}")
-                time.sleep(5)  # Longer wait after exception
-        
-        # If all attempts fail, try direct ffmpeg download
-        st.warning("Trying alternative download method...")
-        try:
-            # Get video ID for direct stream attempt
-            video_id = url.split("v=")[1].split("&")[0]
-            direct_url = f"https://www.youtube.com/watch?v={video_id}"
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            original_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
             
-            # Direct FFmpeg download
-            subprocess.run([
-                "ffmpeg",
-                "-y",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
-                "-i", direct_url,
-                "-vn",
-                "-ar", "16000",
-                "-ac", "1",
-                temp_audio_path
-            ], check=True, timeout=300)
+            if not os.path.exists(original_path):
+                return None, f"Downloaded file not found at {original_path}"
             
-            if os.path.exists(temp_audio_path):
-                return temp_audio_path
-        except Exception as e:
-            logger.error(f"Alternative download failed: {e}")
-        
-        return None
+            # Convert to proper WAV format
+            converted_path = convert_to_wav(original_path, temp_audio_path)
+            
+            if not os.path.exists(converted_path):
+                return None, f"Converted file not found at {converted_path}"
+            
+            return converted_path, None
             
     except Exception as e:
         logger.error(f"Download failed: {e}")
-        return None
+        return None, f"Download failed: {str(e)}"
         
 def convert_to_wav(input_path, output_path=None):
     """Convert audio file to WAV format using FFmpeg"""
@@ -400,9 +360,10 @@ if url:
             else:
                 st.error("Failed to transcribe audio.")
         else:
-            st.error(error_msg if error_msg else """
-            Failed to download audio. Possible reasons:
-            - Video is age-restricted (try signing in to YouTube in your browser first)
+            st.error(f"""
+            Failed to download audio: {error_msg}
+            Possible reasons:
+            - Video is age-restricted
             - Video is not available in your region
             - Video is private or removed
             - Network restrictions
