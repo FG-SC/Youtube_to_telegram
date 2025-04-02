@@ -1,4 +1,3 @@
-
 import streamlit as st
 from pytube import YouTube
 import openai
@@ -18,6 +17,14 @@ import requests
 import logging
 import subprocess
 
+import asyncio
+import nest_asyncio
+
+# Patch the event loop
+try:
+    nest_asyncio.apply()
+except:
+    pass
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
