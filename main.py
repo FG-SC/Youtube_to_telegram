@@ -16,9 +16,8 @@ from urllib.error import HTTPError
 import requests
 import logging
 import subprocess
-import shutil  # Added for directory cleanup
-import asyncio
-import nest_asyncio
+import shutil
+import soundfile as sf
 
 # Configure logging
 logging.basicConfig(
@@ -31,12 +30,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Patch the event loop
-try:
-    nest_asyncio.apply()
-except:
-    pass
-
 # Load environment variables
 load_dotenv()
 
@@ -46,28 +39,85 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 
-def check_ffmpeg():
+def verify_ffmpeg():
     try:
-        subprocess.run(['ffmpeg', '-version'], 
-                     check=True, 
-                     stdout=subprocess.PIPE, 
-                     stderr=subprocess.PIPE)
+        subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return True
-    except:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-if not check_ffmpeg():
+if not verify_ffmpeg():
     st.warning("FFmpeg is not properly installed. Audio processing may fail.")
 
 @st.cache_resource
 def load_whisper_model():
     try:
-        return whisper.load_model("base", device="cpu")  # Use "small" or "tiny" for less memory
+        return whisper.load_model("small")  # Using smaller model for stability
     except Exception as e:
         st.error(f"Failed to load Whisper model: {e}")
         return None
 
 model = load_whisper_model()
+
+def validate_audio_file(audio_path):
+    try:
+        if not os.path.exists(audio_path):
+            return False, "File does not exist"
+            
+        file_size = os.path.getsize(audio_path)
+        if file_size < 10 * 1024:
+            return False, "File is too small (likely corrupted)"
+            
+        try:
+            data, samplerate = sf.read(audio_path)
+            if len(data) == 0:
+                return False, "Audio contains no data"
+            return True, f"Valid audio file ({samplerate}Hz, {len(data)} samples)"
+        except Exception as e:
+            return False, f"Invalid audio format: {str(e)}"
+            
+    except Exception as e:
+        return False, f"Validation error: {str(e)}"
+
+def download_youtube_audio(url):
+    try:
+        temp_dir = tempfile.mkdtemp()
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+                'preferredquality': '192',
+            }],
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'force_generic_extractor': True,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'retries': 3,
+            'audio-format': 'wav',
+            'audio-quality': '0',
+            'prefer-ffmpeg': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            audio_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
+            
+            if not os.path.exists(audio_path):
+                raise FileNotFoundError(f"Audio file not created at {audio_path}")
+            
+            if os.path.getsize(audio_path) < 10 * 1024:
+                raise ValueError("Audio file is too small, likely corrupted")
+            
+            return audio_path
+            
+    except Exception as e:
+        logger.error(f"Download failed: {str(e)}")
+        if 'temp_dir' in locals() and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        return None
 
 def clean_text(text):
     if not text:
@@ -88,40 +138,6 @@ def clean_text(text):
     
     return text.strip()
 
-def download_youtube_audio(url):
-    try:
-        temp_dir = tempfile.mkdtemp()
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav',
-                'preferredquality': '192',
-            }],
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
-            'force_generic_extractor': True,
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'retries': 3,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            audio_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
-            
-            if not os.path.exists(audio_path):
-                raise FileNotFoundError(f"Audio file not created at {audio_path}")
-            
-            return audio_path
-            
-    except Exception as e:
-        logger.error(f"Download failed: {str(e)}")
-        if 'temp_dir' in locals() and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        return None
-
 def transcribe_audio(audio_path):
     if not audio_path or not os.path.exists(audio_path):
         st.error(f"Audio file not found at: {audio_path}")
@@ -130,27 +146,38 @@ def transcribe_audio(audio_path):
     
     try:
         with open(audio_path, 'rb') as f:
-            if f.read(1) == b'':
+            audio_data = f.read()
+            if len(audio_data) == 0:
                 st.error("Audio file is empty")
                 return None
                 
-        result = model.transcribe(audio_path)
-        
-        # Clean up
         try:
-            os.unlink(audio_path)
-            temp_dir = os.path.dirname(audio_path)
-            if temp_dir.startswith(tempfile.gettempdir()):
-                shutil.rmtree(temp_dir)
-        except Exception as e:
-            logger.error(f"Cleanup error: {str(e)}")
+            audio = whisper.load_audio(audio_path)
+            audio = whisper.pad_or_trim(audio)
             
-        return clean_text(result["text"])
-        
+            mel = whisper.log_mel_spectrogram(audio).to(model.device)
+            
+            _, probs = model.detect_language(mel)
+            lang = max(probs, key=probs.get)
+            logger.info(f"Detected language: {lang}")
+            
+            options = whisper.DecodingOptions(fp16=False)
+            result = whisper.decode(model, mel, options)
+            
+            return clean_text(result.text)
+            
+        except RuntimeError as e:
+            st.error(f"Whisper processing error: {e}")
+            logger.error(f"Whisper RuntimeError: {str(e)}")
+            return None
+            
     except Exception as e:
         st.error(f"Error transcribing audio: {e}")
         logger.error(f"Transcription error: {str(e)}")
         return None
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            os.unlink(audio_path)
 
 def extract_video_id(url):
     regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
@@ -190,7 +217,7 @@ def generate_summary(text):
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that summarizes video content."},
-                {"role": "user", "content": f"Create a concise summary (about 100-200 words) of this video transcription:\n\n{text}"}
+                {"role": "user", "content": f"Create a concise summary (100-200 words) of this video transcription:\n\n{text}"}
             ]
         )
         return clean_text(response.choices[0].message.content)
@@ -259,18 +286,38 @@ Comments: {video_details["comments"]:,}
 
 def send_pdf_to_telegram(pdf_path, bot_token, chat_id):
     try:
+        if not os.path.exists(pdf_path):
+            logger.error(f"PDF file not found at: {pdf_path}")
+            return False
+            
+        file_size = os.path.getsize(pdf_path)
+        if file_size == 0:
+            logger.error("PDF file is empty")
+            return False
+            
         url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
-        with open(pdf_path, "rb") as f:
-            files = {"document": f}
-            data = {"chat_id": chat_id}
-            response = requests.post(url, files=files, data=data)
-            logger.info(f"Telegram response: {response.status_code} - {response.text}")
-        return response.status_code == 200
+        
+        with open(pdf_path, 'rb') as f:
+            files = {'document': f}
+            data = {
+                'chat_id': chat_id,
+                'caption': 'YouTube Video Transcript'
+            }
+            
+            response = requests.post(url, files=files, data=data, timeout=30)
+            logger.info(f"Telegram API Response: {response.status_code}")
+            
+            if response.status_code >= 200 and response.status_code < 300:
+                return True
+            else:
+                logger.error(f"Telegram API Error: {response.status_code} - {response.text}")
+                return False
+                
     except Exception as e:
-        logger.error(f"Telegram send error: {str(e)}")
+        logger.error(f"Error sending to Telegram: {str(e)}")
         return False
 
-# Streamlit UI
+# Streamlit App
 st.title("YouTube Video to PDF Transcriber")
 st.write("Enter a YouTube video URL to generate a PDF with its transcription and details.")
 
@@ -301,49 +348,55 @@ if url:
                 audio_path = download_youtube_audio(url)
             
             if audio_path:
-                st.success(f"Audio downloaded successfully!")
-                with st.spinner("Transcribing audio..."):
-                    transcription = transcribe_audio(audio_path)
+                st.success("Audio downloaded successfully!")
                 
-                if transcription:
-                    with st.spinner("Generating summary..."):
-                        summary = generate_summary(transcription)
-                    
-                    if summary:
-                        with st.spinner("Creating PDF..."):
-                            pdf_path = create_pdf(video_details, transcription, summary)
-                        
-                        if pdf_path:
-                            with open(pdf_path, "rb") as f:
-                                st.download_button(
-                                    label="Download PDF",
-                                    data=f,
-                                    file_name=f"{video_details['title']}_transcription.pdf",
-                                    mime="application/pdf"
-                                )
-                            
-                            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID:
-                                if st.button("Send to Telegram"):
-                                    with st.spinner("Sending to Telegram..."):
-                                        if send_pdf_to_telegram(pdf_path, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID):
-                                            st.success("PDF sent to Telegram successfully!")
-                                        else:
-                                            st.error("Failed to send PDF to Telegram")
-                            else:
-                                st.warning("Telegram credentials not configured")
-                            
-                            try:
-                                os.unlink(pdf_path)
-                            except:
-                                pass
-                            
-                            st.text_area("Transcription Preview", transcription, height=300)
-                        else:
-                            st.error("Failed to create PDF")
-                    else:
-                        st.error("Failed to generate summary")
+                # Validate audio file
+                is_valid, validation_msg = validate_audio_file(audio_path)
+                if not is_valid:
+                    st.error(f"Invalid audio file: {validation_msg}")
                 else:
-                    st.error("Failed to transcribe audio")
+                    with st.spinner("Transcribing audio..."):
+                        transcription = transcribe_audio(audio_path)
+                    
+                    if transcription:
+                        with st.spinner("Generating summary..."):
+                            summary = generate_summary(transcription)
+                        
+                        if summary:
+                            with st.spinner("Creating PDF..."):
+                                pdf_path = create_pdf(video_details, transcription, summary)
+                            
+                            if pdf_path:
+                                with open(pdf_path, "rb") as f:
+                                    st.download_button(
+                                        label="Download PDF",
+                                        data=f,
+                                        file_name=f"{video_details['title']}_transcription.pdf",
+                                        mime="application/pdf"
+                                    )
+                                
+                                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID:
+                                    if st.button("Send to Telegram"):
+                                        with st.spinner("Sending to Telegram..."):
+                                            if send_pdf_to_telegram(pdf_path, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID):
+                                                st.success("PDF sent to Telegram successfully!")
+                                            else:
+                                                st.error("Failed to send PDF to Telegram. Check logs for details.")
+                                else:
+                                    st.warning("Telegram credentials not configured")
+                                
+                                try:
+                                    os.unlink(pdf_path)
+                                except:
+                                    pass
+                                
+                                st.text_area("Transcription Preview", transcription, height=300)
+                            else:
+                                st.error("Failed to create PDF")
+                        else:
+                            st.error("Failed to generate summary")
+                    else:
+                        st.error("Failed to transcribe audio")
             else:
                 st.error("""
                 Failed to download audio. Possible reasons:
