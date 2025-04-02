@@ -79,45 +79,34 @@ def validate_audio_file(audio_path):
     except Exception as e:
         return False, f"Validation error: {str(e)}"
 
+# Update your download_youtube_audio function with these options:
 def download_youtube_audio(url):
     try:
-        temp_dir = tempfile.mkdtemp()
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav',
-                'preferredquality': '192',
-            }],
+            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
             'extract_flat': True,
             'force_generic_extractor': True,
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'retries': 3,
-            'audio-format': 'wav',
-            'audio-quality': '0',
-            'prefer-ffmpeg': True,
+            # Add these options:
+            'cookiefile': 'cookies.txt',  # If you have YouTube cookies
+            'referer': 'https://www.youtube.com',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'retries': 10,
+            'fragment-retries': 10,
+            'extractor-retries': 3,
+            'socket-timeout': 30,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            audio_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
-            
-            if not os.path.exists(audio_path):
-                raise FileNotFoundError(f"Audio file not created at {audio_path}")
-            
-            if os.path.getsize(audio_path) < 10 * 1024:
-                raise ValueError("Audio file is too small, likely corrupted")
-            
+            audio_path = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
             return audio_path
-            
     except Exception as e:
-        logger.error(f"Download failed: {str(e)}")
-        if 'temp_dir' in locals() and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        logger.error(f"Download failed: {e}")
         return None
+        
 
 def clean_text(text):
     if not text:
