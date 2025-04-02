@@ -1,7 +1,7 @@
 streamlit==1.35.0
-openai>=1.0.0
-python-dotenv>=1.0.0
-google-api-python-client>=2.108.0
+openai==o.28.0
+python-dotenv==1.1.0
+google_api_python_client==2.107.0
 openai-whisper==20240903
 fpdf2>=2.7.6
 yt_dlp==2025.3.31
