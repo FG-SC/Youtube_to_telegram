@@ -7,4 +7,5 @@ pytube==15.0.0
 streamlit==1.35.0
 yt_dlp==2025.3.31
 torch<=2.6.0
-nest_asyncio
+nest-asyncio==1.5.8
+shutilwhich==1.1.0
