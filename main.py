@@ -18,7 +18,15 @@ import logging
 import subprocess
 import shutil
 import soundfile as sf
+import asyncio
+import nest_asyncio
 
+# Patch the event loop
+try:
+    nest_asyncio.apply()
+except:
+    pass
+    
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
