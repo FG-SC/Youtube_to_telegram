@@ -20,17 +20,33 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
+# Load environment variables
 load_dotenv()
 
-# Initialize services with cache disabled
-youtube = googleapiclient.discovery.build(
-    "youtube", 
-    "v3", 
-    developerKey=os.getenv("YOUTUBE_API_KEY"),
-    cache_discovery=False  # Disable cache to avoid warnings
-)
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Gracefully handle missing environment variables
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+if not YOUTUBE_API_KEY:
+    st.error("YouTube API key is missing. Please set it in your environment variables.")
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    st.error("OpenAI API key is missing. Please set it in your environment variables.")
+else:
+    openai.api_key = OPENAI_API_KEY
+
+# Only initialize YouTube API if we have a key
+youtube = None
+if YOUTUBE_API_KEY:
+    try:
+        youtube = googleapiclient.discovery.build(
+            "youtube", 
+            "v3", 
+            developerKey=YOUTUBE_API_KEY,
+            cache_discovery=False
+        )
+    except Exception as e:
+        st.error(f"Failed to initialize YouTube API: {e}")
+        
 # Verify FFmpeg installation
 def verify_ffmpeg():
     try:
@@ -41,17 +57,24 @@ def verify_ffmpeg():
 
 if not verify_ffmpeg():
     st.warning("FFmpeg is not properly installed. Some audio processing may fail.")
-
+    
 # Initialize Whisper model with error handling
 @st.cache_resource
 def load_whisper_model():
     try:
-        # Use base model for better accuracy while still being relatively fast
-        return whisper.load_model("base")  # tiny, base, small, medium, large
+        # Use tiny model for faster transcription and lower memory usage
+        return whisper.load_model("tiny")
     except Exception as e:
         st.error(f"Failed to load Whisper model: {e}")
+        logger.error(f"Whisper model error: {str(e)}")
         return None
 
+# Initialize model only when needed
+def get_whisper_model():
+    model = load_whisper_model()
+    if model is None:
+        st.error("Failed to initialize speech recognition model. Please try again later.")
+    return model
 model = load_whisper_model()
 
 def clean_text(text):
@@ -62,13 +85,13 @@ def clean_text(text):
     return text.encode('ascii', 'ignore').decode('ascii').strip()
 
 def download_youtube_audio(url):
-    """Download YouTube audio with improved reliability and cookie support"""
+    """Download YouTube audio with improved reliability"""
     try:
         # Create temp directory for downloads
         temp_dir = tempfile.mkdtemp()
         temp_audio_path = os.path.join(temp_dir, "audio.wav")
         
-        # Configure yt-dlp with proper headers and retries
+        # Configure yt-dlp with additional options for reliability
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
@@ -80,64 +103,75 @@ def download_youtube_audio(url):
             'quiet': True,
             'no_warnings': True,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
                 'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
             },
-            'retries': 10,
-            'fragment-retries': 10,
-            'extractor-retries': 3,
-            'socket-timeout': 30,
+            'retries': 30,
+            'fragment-retries': 30,  
+            'extractor-retries': 10,
+            'socket-timeout': 60,
             'extract_flat': True,
-            # Try to use cookies if available (helps with age-restricted content)
-            'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
+            'external_downloader': 'native',  # Don't use external downloaders
+            'nocheckcertificate': True,  # Skip SSL verification
+            'geo_bypass': True,  # Try to bypass geo-restrictions
+            'ignoreerrors': True,  # Continue on download errors
         }
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # Try multiple download attempts
+        for attempt in range(3):
             try:
-                info = ydl.extract_info(url, download=True)
-                original_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
-                
-                if not os.path.exists(original_path):
-                    raise FileNotFoundError(f"Downloaded file not found at {original_path}")
-                
-                # Convert to proper WAV format
-                converted_path = convert_to_wav(original_path, temp_audio_path)
-                
-                if not os.path.exists(converted_path):
-                    raise FileNotFoundError(f"Converted file not found at {converted_path}")
-                
-                return converted_path
-            except yt_dlp.utils.DownloadError as e:
-                if "Private video" in str(e):
-                    raise Exception("This video is private and cannot be accessed")
-                elif "Sign in to confirm your age" in str(e):
-                    raise Exception("Age-restricted video - please sign in to YouTube first")
-                else:
-                    raise e
-                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if not info:
+                        continue
+                        
+                    original_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
+                    
+                    if os.path.exists(original_path):
+                        return original_path
+                    
+                    st.warning(f"Download attempt {attempt+1} failed. Retrying...")
+                    time.sleep(3)  # Wait before retry
+            except Exception as e:
+                logger.error(f"Download attempt {attempt+1} failed: {e}")
+                time.sleep(5)  # Longer wait after exception
+        
+        # If all attempts fail, try direct ffmpeg download
+        st.warning("Trying alternative download method...")
+        try:
+            # Get video ID for direct stream attempt
+            video_id = url.split("v=")[1].split("&")[0]
+            direct_url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            # Direct FFmpeg download
+            subprocess.run([
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+                "-i", direct_url,
+                "-vn",
+                "-ar", "16000",
+                "-ac", "1",
+                temp_audio_path
+            ], check=True, timeout=300)
+            
+            if os.path.exists(temp_audio_path):
+                return temp_audio_path
+        except Exception as e:
+            logger.error(f"Alternative download failed: {e}")
+        
+        return None
+            
     except Exception as e:
         logger.error(f"Download failed: {e}")
-        # Clean up temp files if they exist
-        try:
-            if 'original_path' in locals() and os.path.exists(original_path):
-                os.unlink(original_path)
-            if 'converted_path' in locals() and os.path.exists(converted_path):
-                os.unlink(converted_path)
-            if 'temp_dir' in locals() and os.path.exists(temp_dir):
-                os.rmdir(temp_dir)
-        except:
-            pass
+        return None
         
-        # Return the specific error message
-        if "Age-restricted" in str(e):
-            return None, "This video is age-restricted. Please sign in to YouTube in your browser first."
-        elif "Private video" in str(e):
-            return None, "This video is private and cannot be accessed."
-        else:
-            return None, "Failed to download video. YouTube may be temporarily blocking our requests. Please try again later."
-
 def convert_to_wav(input_path, output_path=None):
     """Convert audio file to WAV format using FFmpeg"""
     if output_path is None:
@@ -303,12 +337,17 @@ if url:
     video_id = extract_video_id(url)
     if not video_id:
         st.error("Invalid YouTube URL. Please enter a valid YouTube video URL.")
-    
-    with st.spinner("Fetching video details..."):
-        video_details = get_video_details(video_id)
-    
-    if not video_details:
-        st.error("Failed to fetch video details. The video may be private or unavailable.")
+    elif not youtube:
+        st.error("YouTube API not initialized. Please check your API key.")
+    else:
+        with st.spinner("Fetching video details..."):
+            try:
+                video_details = get_video_details(video_id)
+                if not video_details:
+                    st.error("Failed to fetch video details. The video may be private or unavailable.")
+            except Exception as e:
+                st.error(f"Error fetching video details: {str(e)}")
+                video_details = None
         
     col1, col2 = st.columns([1, 2])
     with col1:
