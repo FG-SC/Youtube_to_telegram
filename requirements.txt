@@ -1,4 +1,4 @@
-streamlit==1.32.0
+streamlit
 openai==0.28
 pytube
 openai-whisper==20240930
@@ -7,4 +7,3 @@ google-api-python-client
 fpdf2==2.7.7
 yt-dlp
 requests
-nest_asyncio==1.5.8
