@@ -1,5 +1,5 @@
 streamlit==1.35.0
-openai==o.28.0
+openai==0.28.0
 python-dotenv==1.1.0
 google_api_python_client==2.107.0
 openai-whisper==20240903
