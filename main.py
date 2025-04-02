@@ -42,10 +42,13 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Initialize services
-youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=os.getenv("YOUTUBE_API_KEY"))
-openai.api_key = os.getenv("OPENAI_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+youtube_api_key = st.secrets["YOUTUBE_API_KEY"]
+youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=youtube_api_key)
+openai.api_key = st.secrets["OPENAI_API_KEY"]
+
+# Load secret variables from Streamlit Cloud
+TELEGRAM_BOT_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHANNEL_ID = st.secrets["TELEGRAM_CHANNEL_ID"]
 
 def verify_ffmpeg():
     try:
