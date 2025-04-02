@@ -10,6 +10,7 @@ from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 import re
 import yt_dlp
+import requests
 import logging
 import subprocess
 
@@ -23,6 +24,9 @@ load_dotenv()
 # Initialize services
 youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=os.getenv("YOUTUBE_API_KEY"))
 openai.api_key = os.getenv("OPENAI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+
 # Verify FFmpeg installation
 def verify_ffmpeg():
     try:
@@ -38,7 +42,7 @@ if not verify_ffmpeg():
 @st.cache_resource
 def load_whisper_model():
     try:
-        return whisper.load_model("tiny")  # You can use "small", "medium", or "large" for better quality
+        return whisper.load_model("base")  # You can use "small", "medium", or "large" for better quality
     except Exception as e:
         st.error(f"Failed to load Whisper model: {e}")
         return None
@@ -65,7 +69,7 @@ def convert_to_wav(input_path, output_path=None):
         logger.error(f"FFmpeg conversion failed: {e}")
         return None
 
-# Updated download function with better error handling
+# Modified download function with format conversion
 def download_youtube_audio(url):
     try:
         # Create temp directory for downloads
@@ -82,59 +86,26 @@ def download_youtube_audio(url):
             }],
             'quiet': True,
             'no_warnings': True,
-            # Add these options to bypass restrictions
-            'extract_flat': True,
-            'ignoreerrors': True,
-            'retries': 3,
-            'socket_timeout': 30,
-            'force_ipv4': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                info = ydl.extract_info(url, download=True)
-                if not info:
-                    raise Exception("Failed to extract video info")
-                
-                original_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
-                
-                # Ensure the file exists
-                if not os.path.exists(original_path):
-                    raise FileNotFoundError(f"Downloaded file not found at {original_path}")
-                
-                # Convert to proper WAV format if needed
-                converted_path = convert_to_wav(original_path, temp_audio_path)
-                
-                if not os.path.exists(converted_path):
-                    raise FileNotFoundError(f"Converted file not found at {converted_path}")
-                
-                return converted_path
-                
-            except Exception as e:
-                # Try fallback format if first attempt fails
-                try:
-                    ydl_opts['format'] = 'worstaudio/worst'
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl_fallback:
-                        info = ydl_fallback.extract_info(url, download=True)
-                        original_path = ydl_fallback.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
-                        converted_path = convert_to_wav(original_path, temp_audio_path)
-                        return converted_path
-                except Exception as fallback_e:
-                    logger.error(f"Fallback download failed: {fallback_e}")
-                    raise e
-                
+            info = ydl.extract_info(url, download=True)
+            original_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
+            
+            # Ensure the file exists
+            if not os.path.exists(original_path):
+                raise FileNotFoundError(f"Downloaded file not found at {original_path}")
+            
+            # Convert to proper WAV format if needed
+            converted_path = convert_to_wav(original_path, temp_audio_path)
+            
+            if not os.path.exists(converted_path):
+                raise FileNotFoundError(f"Converted file not found at {converted_path}")
+            
+            return converted_path
+            
     except Exception as e:
         logger.error(f"Download failed: {e}")
-        st.error(f"Failed to download video: {str(e)}. YouTube may be blocking the download. Try a different video or check your network settings.")
         try:
             # Clean up temp files if they exist
             if 'original_path' in locals() and os.path.exists(original_path):
@@ -412,6 +383,21 @@ Comments: {video_details["comments"]:,}
     pdf.output(temp_pdf.name)
     return temp_pdf.name
 
+
+# Modified send_pdf_to_telegram function with better error handling
+def send_pdf_to_telegram(pdf_path, bot_token, chat_id):
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
+        with open(pdf_path, "rb") as f:
+            files = {"document": f}
+            data = {"chat_id": chat_id}
+            response = requests.post(url, files=files, data=data)
+            logger.info(f"Telegram API response: {response.status_code} - {response.text}")
+        return response.status_code == 200
+    except Exception as e:
+        logger.error(f"Error sending to Telegram: {str(e)}")
+        return False
+
 # Streamlit app
 st.title("YouTube Video to PDF Transcriber")
 st.write("Enter a YouTube video URL to generate a PDF with its transcription and details.")
@@ -486,6 +472,21 @@ if url:
                     file_name=f"{video_details['title']}_transcription.pdf",
                     mime="application/pdf"
                 )
+            
+            # Debug: Show Telegram credentials status
+            st.write(f"Telegram Bot Token: {'Configured' if TELEGRAM_BOT_TOKEN else 'Not Configured'}")
+            st.write(f"Telegram Channel ID: {'Configured' if TELEGRAM_CHANNEL_ID else 'Not Configured'}")
+            
+            # Add Telegram send button if credentials are configured
+            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID:
+                if st.button("Send to Telegram"):
+                    with st.spinner("Sending to Telegram..."):
+                        if send_pdf_to_telegram(st.session_state.pdf_path, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID):
+                            st.success("PDF sent to Telegram successfully!")
+                        else:
+                            st.error("Failed to send PDF to Telegram. Check logs for details.")
+            else:
+                st.warning("Telegram credentials not properly configured. Please check your .env file.")
             
             st.success("PDF generated successfully!")
             st.text_area("Transcription Preview", st.session_state.transcription, height=300)
