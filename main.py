@@ -2,6 +2,7 @@ import streamlit as st
 import openai
 import datetime
 import tempfile
+import whisper
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 import re
@@ -10,7 +11,8 @@ import logging
 import subprocess
 import shutil
 import os
-import yt_dlp  # More reliable than pytube
+import yt_dlp
+import wave
 
 # Disable unnecessary warnings
 logging.getLogger("googleapiclient").setLevel(logging.ERROR)
@@ -52,13 +54,39 @@ if not verify_ffmpeg():
 @st.cache_resource
 def load_whisper_model():
     try:
-        # Use small model for better performance
         return whisper.load_model("small", device="cpu")
     except Exception as e:
         st.error(f"Failed to load Whisper model: {e}")
         return None
 
 model = load_whisper_model()
+
+def validate_audio_file(audio_path):
+    try:
+        if not os.path.exists(audio_path):
+            return False, "File does not exist"
+            
+        file_size = os.path.getsize(audio_path)
+        if file_size < 10 * 1024:
+            return False, "File is too small (likely corrupted)"
+        
+        try:
+            with wave.open(audio_path, 'rb') as wav_file:
+                frames = wav_file.getnframes()
+                if frames == 0:
+                    return False, "Audio contains no data"
+                return True, f"Valid WAV file ({wav_file.getframerate()}Hz)"
+        except:
+            try:
+                with open(audio_path, 'rb') as f:
+                    header = f.read(4)
+                    if len(header) < 4:
+                        return False, "File too small to be valid audio"
+                    return True, "Non-WAV audio file"
+            except:
+                return False, "File is not readable"
+    except Exception as e:
+        return False, f"Validation error: {str(e)}"
 
 def download_youtube_audio(url):
     try:
@@ -75,7 +103,6 @@ def download_youtube_audio(url):
             'no_warnings': True,
             'extract_flat': True,
             'force_generic_extractor': True,
-            # Add these to bypass restrictions
             'referer': 'https://www.youtube.com',
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'retries': 10,
@@ -101,6 +128,7 @@ def download_youtube_audio(url):
         if 'temp_dir' in locals() and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         return None
+
 def clean_text(text):
     if not text:
         return ""
@@ -153,38 +181,6 @@ def transcribe_audio(audio_path):
         if audio_path and os.path.exists(audio_path):
             os.unlink(audio_path)
 
-def extract_video_id(url):
-    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
-    match = re.search(regex, url)
-    return match.group(1) if match else None
-
-def get_video_details(video_id):
-    try:
-        request = youtube.videos().list(
-            part="snippet,statistics",
-            id=video_id
-        )
-        response = request.execute()
-
-        if response["items"]:
-            item = response["items"][0]
-            snippet = item["snippet"]
-            statistics = item["statistics"]
-            return {
-                "title": snippet["title"],
-                "channel": snippet["channelTitle"],
-                "published_at": snippet["publishedAt"],
-                "views": int(statistics.get("viewCount", 0)),
-                "likes": int(statistics.get("likeCount", 0)),
-                "comments": int(statistics.get("commentCount", 0)),
-                "description": snippet["description"],
-                "thumbnail": snippet["thumbnails"]["high"]["url"]
-            }
-        return None
-    except Exception as e:
-        st.error(f"Error retrieving video details: {e}")
-        return None
-
 def generate_summary(text):
     try:
         response = openai.ChatCompletion.create(
@@ -199,7 +195,7 @@ def generate_summary(text):
         st.error(f"Error generating summary: {e}")
         return None
 
-def create_pdf(video_details, transcription, summary):
+def create_pdf(video_title, channel, published_date, views, likes, comments, transcription, summary):
     try:
         pdf = FPDF()
         pdf.add_page()
@@ -210,30 +206,34 @@ def create_pdf(video_details, transcription, summary):
         except:
             pdf.set_font("helvetica", size=12)
         
+        # Title
         pdf.set_font(size=16, style="B")
-        title = clean_text(video_details["title"])
+        title = clean_text(video_title)
         pdf.cell(200, 10, txt=title, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
         pdf.ln(10)
         
+        # Video details
         pdf.set_font(size=12, style="B")
         pdf.cell(200, 10, txt="Video Details", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font(size=12)
         
-        details = f"""Channel: {clean_text(video_details["channel"])}
-Published: {datetime.datetime.strptime(video_details["published_at"], '%Y-%m-%dT%H:%M:%SZ').strftime('%B %d, %Y')}
-Views: {video_details["views"]:,}
-Likes: {video_details["likes"]:,}
-Comments: {video_details["comments"]:,}
+        details = f"""Channel: {clean_text(channel)}
+Published: {datetime.datetime.strptime(published_date, '%Y-%m-%dT%H:%M:%SZ').strftime('%B %d, %Y')}
+Views: {views:,}
+Likes: {likes:,}
+Comments: {comments:,}
 """
         pdf.multi_cell(0, 10, txt=clean_text(details))
         pdf.ln(10)
         
+        # Summary
         pdf.set_font(size=12, style="B")
         pdf.cell(200, 10, txt="Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font(size=12)
         pdf.multi_cell(0, 10, txt=clean_text(summary))
         pdf.ln(10)
         
+        # Transcription
         pdf.set_font(size=12, style="B")
         pdf.cell(200, 10, txt="Full Transcription", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font(size=12)
@@ -287,8 +287,7 @@ def send_pdf_to_telegram(pdf_path, bot_token, chat_id):
         logger.error(f"Error sending to Telegram: {str(e)}")
         return False
 
-
-# Streamlit UI
+# Streamlit App
 st.title("YouTube Video to PDF Transcriber")
 st.write("Enter a YouTube video URL to generate a PDF with its transcription and details.")
 
@@ -305,57 +304,72 @@ if url:
         if audio_path:
             st.success("Audio downloaded successfully!")
             
-            with st.spinner("Transcribing audio..."):
-                transcription = transcribe_audio(audio_path)
-    
-            
-            if transcription:
-                with st.spinner("Generating summary..."):
-                    summary = generate_summary(transcription)
+            is_valid, validation_msg = validate_audio_file(audio_path)
+            if not is_valid:
+                st.error(f"Invalid audio file: {validation_msg}")
+            else:
+                with st.spinner("Transcribing audio..."):
+                    transcription = transcribe_audio(audio_path)
                 
-                if summary:
-                    with st.spinner("Creating PDF..."):
-                        pdf_path = create_pdf(video_details, transcription, summary)
+                if transcription:
+                    with st.spinner("Generating summary..."):
+                        summary = generate_summary(transcription)
                     
-                    if pdf_path:
-                        with open(pdf_path, "rb") as f:
-                            st.download_button(
-                                label="Download PDF",
-                                data=f,
-                                file_name=f"{video_details['title']}_transcription.pdf",
-                                mime="application/pdf"
+                    if summary:
+                        # Get basic video info from URL
+                        video_title = url.split('v=')[1][:11]  # Just use video ID as title
+                        
+                        with st.spinner("Creating PDF..."):
+                            pdf_path = create_pdf(
+                                video_title=video_title,
+                                channel="YouTube Video",
+                                published_date=datetime.datetime.now().isoformat(),
+                                views=0,
+                                likes=0,
+                                comments=0,
+                                transcription=transcription,
+                                summary=summary
                             )
                         
-                        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID:
-                            if st.button("Send to Telegram"):
-                                with st.spinner("Sending to Telegram..."):
-                                    if send_pdf_to_telegram(pdf_path, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID):
-                                        st.success("PDF sent to Telegram successfully!")
-                                    else:
-                                        st.error("Failed to send PDF to Telegram. Check logs for details.")
+                        if pdf_path:
+                            with open(pdf_path, "rb") as f:
+                                st.download_button(
+                                    label="Download PDF",
+                                    data=f,
+                                    file_name=f"transcription_{video_title}.pdf",
+                                    mime="application/pdf"
+                                )
+                            
+                            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID:
+                                if st.button("Send to Telegram"):
+                                    with st.spinner("Sending to Telegram..."):
+                                        if send_pdf_to_telegram(pdf_path, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID):
+                                            st.success("PDF sent to Telegram successfully!")
+                                        else:
+                                            st.error("Failed to send PDF to Telegram. Check logs for details.")
+                            else:
+                                st.warning("Telegram credentials not configured")
+                            
+                            try:
+                                os.unlink(pdf_path)
+                            except:
+                                pass
+                            
+                            st.text_area("Transcription Preview", transcription, height=300)
                         else:
-                            st.warning("Telegram credentials not configured")
-                        
-                        try:
-                            os.unlink(pdf_path)
-                        except:
-                            pass
-                        
-                        st.text_area("Transcription Preview", transcription, height=300)
+                            st.error("Failed to create PDF")
                     else:
-                        st.error("Failed to create PDF")
+                        st.error("Failed to generate summary")
                 else:
-                    st.error("Failed to generate summary")
-            else:
-                st.error("Failed to transcribe audio")
-    else:
-        st.error("""
-        Failed to download audio. Possible reasons:
-        - Video is age-restricted or private
-        - Network restrictions
-        - YouTube rate limiting
-        
-        Try these solutions:
-        1. Test with a different public video
-        2. Wait and try again later
-        """)
+                    st.error("Failed to transcribe audio")
+        else:
+            st.error("""
+            Failed to download audio. Possible reasons:
+            - Video is age-restricted or private
+            - Network restrictions
+            - YouTube rate limiting
+            
+            Try these solutions:
+            1. Test with a different public video
+            2. Wait and try again later
+            """)
