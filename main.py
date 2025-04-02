@@ -1,7 +1,6 @@
 import streamlit as st
 from pytube import YouTube
 import openai
-import os
 import datetime
 import googleapiclient.discovery
 import tempfile
@@ -16,6 +15,7 @@ import requests
 import logging
 import subprocess
 import shutil
+import wave
 
 # Configure logging
 logging.basicConfig(
@@ -38,12 +38,10 @@ except Exception as e:
     st.error(f"Failed to load required secrets: {e}")
     st.stop()
 
-# Initialize services with secrets
+# Initialize services
 youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 openai.api_key = OPENAI_API_KEY
 
-# Rest of your code remains exactly the same...
-# [Keep all your existing functions unchanged]
 def verify_ffmpeg():
     try:
         subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -53,15 +51,15 @@ def verify_ffmpeg():
 
 if not verify_ffmpeg():
     st.warning("FFmpeg is not properly installed. Audio processing may fail.")
-# Update your Whisper model loading:
+
 @st.cache_resource
 def load_whisper_model():
     try:
-        # Use the tiny or small model for production
-        return whisper.load_model("tiny", device="cpu")  # or "small"
+        return whisper.load_model("base")
     except Exception as e:
         st.error(f"Failed to load Whisper model: {e}")
         return None
+
 model = load_whisper_model()
 
 def validate_audio_file(audio_path):
@@ -72,46 +70,61 @@ def validate_audio_file(audio_path):
         file_size = os.path.getsize(audio_path)
         if file_size < 10 * 1024:
             return False, "File is too small (likely corrupted)"
-            
+        
         try:
-            data, samplerate = sf.read(audio_path)
-            if len(data) == 0:
-                return False, "Audio contains no data"
-            return True, f"Valid audio file ({samplerate}Hz, {len(data)} samples)"
-        except Exception as e:
-            return False, f"Invalid audio format: {str(e)}"
-            
+            with wave.open(audio_path, 'rb') as wav_file:
+                frames = wav_file.getnframes()
+                if frames == 0:
+                    return False, "Audio contains no data"
+                return True, f"Valid WAV file ({wav_file.getframerate()}Hz)"
+        except:
+            try:
+                with open(audio_path, 'rb') as f:
+                    header = f.read(4)
+                    if len(header) < 4:
+                        return False, "File too small to be valid audio"
+                    return True, "Non-WAV audio file"
+            except:
+                return False, "File is not readable"
     except Exception as e:
         return False, f"Validation error: {str(e)}"
 
-# Update your download_youtube_audio function with these options:
 def download_youtube_audio(url):
     try:
+        temp_dir = tempfile.mkdtemp()
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
+            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+                'preferredquality': '192',
+            }],
             'quiet': True,
             'no_warnings': True,
             'extract_flat': True,
             'force_generic_extractor': True,
-            # Add these options:
-            'cookiefile': 'cookies.txt',  # If you have YouTube cookies
-            'referer': 'https://www.youtube.com',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'retries': 10,
-            'fragment-retries': 10,
-            'extractor-retries': 3,
-            'socket-timeout': 30,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'retries': 3,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            audio_path = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
+            audio_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
+            
+            if not os.path.exists(audio_path):
+                raise FileNotFoundError(f"Audio file not created at {audio_path}")
+            
+            if os.path.getsize(audio_path) < 10 * 1024:
+                raise ValueError("Audio file is too small, likely corrupted")
+            
             return audio_path
+            
     except Exception as e:
-        logger.error(f"Download failed: {e}")
+        logger.error(f"Download failed: {str(e)}")
+        if 'temp_dir' in locals() and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
         return None
-        
 
 def clean_text(text):
     if not text:
@@ -135,7 +148,6 @@ def clean_text(text):
 def transcribe_audio(audio_path):
     if not audio_path or not os.path.exists(audio_path):
         st.error(f"Audio file not found at: {audio_path}")
-        logger.error(f"Audio file missing: {audio_path}")
         return None
     
     try:
@@ -145,26 +157,19 @@ def transcribe_audio(audio_path):
                 st.error("Audio file is empty")
                 return None
                 
-        try:
-            audio = whisper.load_audio(audio_path)
-            audio = whisper.pad_or_trim(audio)
-            
-            mel = whisper.log_mel_spectrogram(audio).to(model.device)
-            
-            _, probs = model.detect_language(mel)
-            lang = max(probs, key=probs.get)
-            logger.info(f"Detected language: {lang}")
-            
-            options = whisper.DecodingOptions(fp16=False)
-            result = whisper.decode(model, mel, options)
-            
-            return clean_text(result.text)
-            
-        except RuntimeError as e:
-            st.error(f"Whisper processing error: {e}")
-            logger.error(f"Whisper RuntimeError: {str(e)}")
-            return None
-            
+        audio = whisper.load_audio(audio_path)
+        audio = whisper.pad_or_trim(audio)
+        mel = whisper.log_mel_spectrogram(audio).to(model.device)
+        
+        _, probs = model.detect_language(mel)
+        lang = max(probs, key=probs.get)
+        logger.info(f"Detected language: {lang}")
+        
+        options = whisper.DecodingOptions(fp16=False)
+        result = whisper.decode(model, mel, options)
+        
+        return clean_text(result.text)
+        
     except Exception as e:
         st.error(f"Error transcribing audio: {e}")
         logger.error(f"Transcription error: {str(e)}")
@@ -230,13 +235,11 @@ def create_pdf(video_details, transcription, summary):
         except:
             pdf.set_font("helvetica", size=12)
         
-        # Title
         pdf.set_font(size=16, style="B")
         title = clean_text(video_details["title"])
         pdf.cell(200, 10, txt=title, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
         pdf.ln(10)
         
-        # Video details
         pdf.set_font(size=12, style="B")
         pdf.cell(200, 10, txt="Video Details", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font(size=12)
@@ -250,14 +253,12 @@ Comments: {video_details["comments"]:,}
         pdf.multi_cell(0, 10, txt=clean_text(details))
         pdf.ln(10)
         
-        # Summary
         pdf.set_font(size=12, style="B")
         pdf.cell(200, 10, txt="Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font(size=12)
         pdf.multi_cell(0, 10, txt=clean_text(summary))
         pdf.ln(10)
         
-        # Transcription
         pdf.set_font(size=12, style="B")
         pdf.cell(200, 10, txt="Full Transcription", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font(size=12)
@@ -301,7 +302,7 @@ def send_pdf_to_telegram(pdf_path, bot_token, chat_id):
             response = requests.post(url, files=files, data=data, timeout=30)
             logger.info(f"Telegram API Response: {response.status_code}")
             
-            if response.status_code >= 200 and response.status_code < 300:
+            if response.status_code == 200:
                 return True
             else:
                 logger.error(f"Telegram API Error: {response.status_code} - {response.text}")
@@ -344,7 +345,6 @@ if url:
             if audio_path:
                 st.success("Audio downloaded successfully!")
                 
-                # Validate audio file
                 is_valid, validation_msg = validate_audio_file(audio_path)
                 if not is_valid:
                     st.error(f"Invalid audio file: {validation_msg}")
