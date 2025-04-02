@@ -11,47 +11,185 @@ from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 import re
 from pytube.exceptions import PytubeError
-import yt_dlp  # More reliable alternative to pytube
+import yt_dlp
 from urllib.error import HTTPError
+import logging
+import subprocess
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-# Initialize the YouTube API client
+# Initialize services
 youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=os.getenv("YOUTUBE_API_KEY"))
-
-# Set OpenAI API key
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Initialize Whisper model (load it once and cache)
+# Verify FFmpeg installation
+def verify_ffmpeg():
+    try:
+        subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+if not verify_ffmpeg():
+    st.warning("FFmpeg is not properly installed. Some audio processing may fail.")
+
+# Initialize Whisper model with error handling
 @st.cache_resource
 def load_whisper_model():
-    return whisper.load_model("small")  # You can use "small", "medium", or "large" for better quality
+    try:
+        return whisper.load_model("base")  # You can use "small", "medium", or "large" for better quality
+    except Exception as e:
+        st.error(f"Failed to load Whisper model: {e}")
+        return None
 
 model = load_whisper_model()
 
-# Function to clean text for PDF
 def clean_text(text):
-    # Replace common problematic Unicode characters
+    """
+    Clean text for PDF generation by:
+    - Replacing problematic Unicode characters with ASCII equivalents
+    - Removing unsupported emojis (with option to keep some)
+    - Ensuring text is PDF-compatible
+    """
+    if not text:
+        return ""
+    
+    # Standard replacements
     replacements = {
-        '’': "'",
-        '“': '"',
-        '”': '"',
-        '–': '-',
-        '—': '-',
-        '…': '...'
+        '’': "'", '‘': "'", '“': '"', '”': '"', '–': '-', '—': '-',
+        '…': '...', '•': '*', '·': '*', '«': '"', '»': '"', '‹': "'", '›': "'",
+        '™': '(TM)', '®': '(R)', '©': '(C)', '±': '+/-', 'µ': 'u', '°': ' deg',
     }
+    
+    # First pass - standard replacements
     for orig, repl in replacements.items():
         text = text.replace(orig, repl)
-    return text
+    
+    # Second pass - handle emojis by removing them (or replace with text if preferred)
+    # Remove all emojis and other non-ASCII characters
+    text = text.encode('ascii', 'ignore').decode('ascii')
+    
+    return text.strip()
 
-# Function to extract video ID from URL
+def download_youtube_audio(url):
+    """Download YouTube audio with improved error handling and retries"""
+    try:
+        # Create temp directory for downloads
+        temp_dir = tempfile.mkdtemp()
+        temp_audio_path = os.path.join(temp_dir, "audio.wav")
+        
+        # Try yt-dlp first with proper headers to avoid 403 errors
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+                'preferredquality': '192',
+            }],
+            'quiet': True,
+            'no_warnings': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+            'retries': 3,
+            'fragment-retries': 3,
+            'skip-unavailable-fragments': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            original_path = ydl.prepare_filename(info).replace('.webm', '.wav').replace('.m4a', '.wav')
+            
+            if not os.path.exists(original_path):
+                raise FileNotFoundError(f"Downloaded file not found at {original_path}")
+            
+            # Convert to proper WAV format if needed
+            converted_path = convert_to_wav(original_path, temp_audio_path)
+            
+            if not os.path.exists(converted_path):
+                raise FileNotFoundError(f"Converted file not found at {converted_path}")
+            
+            return converted_path
+            
+    except Exception as e:
+        logger.error(f"Download with yt-dlp failed: {e}")
+        # Fallback to pytube if yt-dlp fails
+        try:
+            return download_with_pytube(url)
+        except Exception as e:
+            st.error(f"Failed to download audio: {e}")
+            return None
+
+def download_with_pytube(url):
+    """Fallback download function using pytube"""
+    try:
+        yt = YouTube(
+            url,
+            use_oauth=True,
+            allow_oauth_cache=True,
+            on_progress_callback=lambda stream, chunk, bytes_remaining: st.write("Downloading...")
+        )
+        
+        audio_stream = yt.streams.filter(only_audio=True).order_by('abr').last()
+        
+        if not audio_stream:
+            raise PytubeError("No audio stream available")
+            
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+            audio_stream.download(filename=tmp_file.name)
+            return convert_to_wav(tmp_file.name)
+            
+    except Exception as e:
+        logger.error(f"Pytube download failed: {e}")
+        return None
+
+def convert_to_wav(input_path, output_path=None):
+    """Convert audio file to WAV format using FFmpeg"""
+    if output_path is None:
+        output_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+    
+    try:
+        subprocess.run([
+            "ffmpeg",
+            "-i", input_path,
+            "-ac", "1",  # Mono audio
+            "-ar", "16000",  # 16kHz sample rate
+            "-y",  # Overwrite without asking
+            output_path
+        ], check=True)
+        # Clean up the original file
+        if input_path != output_path:
+            os.unlink(input_path)
+        return output_path
+    except subprocess.CalledProcessError as e:
+        logger.error(f"FFmpeg conversion failed: {e}")
+        return None
+
+def transcribe_audio(audio_path):
+    if not audio_path or not os.path.exists(audio_path):
+        st.error(f"Audio file not found at: {audio_path}")
+        return None
+    
+    try:
+        result = model.transcribe(audio_path)
+        return clean_text(result["text"])
+    except Exception as e:
+        st.error(f"Error transcribing audio: {e}")
+        logger.error(f"Transcription error: {str(e)}")
+        return None
+
 def extract_video_id(url):
     regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
     match = re.search(regex, url)
     return match.group(1) if match else None
 
-# Function to get video details
 def get_video_details(video_id):
     try:
         request = youtube.videos().list(
@@ -79,74 +217,10 @@ def get_video_details(video_id):
         st.error(f"Error retrieving video details: {e}")
         return None
 
-# Primary download function using yt-dlp (more reliable)
-def download_youtube_audio(url):
-    try:
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'outtmpl': os.path.join(tempfile.gettempdir(), '%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
-            'force_generic_extractor': True,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            audio_path = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
-            return audio_path
-            
-    except Exception as e:
-        st.warning(f"yt-dlp failed, trying pytube as fallback: {str(e)}")
-        return download_with_pytube(url)
-
-# Fallback download function using pytube
-def download_with_pytube(url):
-    try:
-        yt = YouTube(
-            url,
-            use_oauth=True,
-            allow_oauth_cache=True,
-            on_progress_callback=lambda stream, chunk, bytes_remaining: st.write("Downloading...")
-        )
-        
-        audio_stream = yt.streams.filter(only_audio=True).order_by('abr').last()
-        
-        if not audio_stream:
-            raise PytubeError("No audio stream available")
-            
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-            audio_stream.download(filename=tmp_file.name)
-            return tmp_file.name
-            
-    except HTTPError as e:
-        if e.code == 403:
-            st.error("YouTube is rate limiting us. Please try again later.")
-        else:
-            st.error(f"HTTP Error {e.code}: {e.reason}")
-    except Exception as e:
-        st.error(f"Failed to download audio: {str(e)}")
-    return None
-
-# Function to transcribe audio using Whisper
-def transcribe_audio(audio_path):
-    try:
-        result = model.transcribe(audio_path)
-        return clean_text(result["text"])
-    except Exception as e:
-        st.error(f"Error transcribing audio: {e}")
-        return None
-
-# Function to generate summary using OpenAI
 def generate_summary(text):
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
+            model="gpt-4",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that summarizes video content."},
                 {"role": "user", "content": f"Create a concise summary (about 500 words) of the following video transcription if it has more than a thousand words, if not, make the summary about 100 words:\n\n{text}"}
@@ -157,29 +231,17 @@ def generate_summary(text):
         st.error(f"Error generating summary: {e}")
         return None
 
-# Function to create PDF with Unicode support
 def create_pdf(video_details, transcription, summary):
     pdf = FPDF()
     pdf.add_page()
     
-    # Try to add Unicode font
-    try:
-        # Try to use DejaVuSans if available
-        pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
-        pdf.set_font("DejaVu", size=12)
-    except:
-        try:
-            # Fallback to Arial Unicode if available
-            pdf.add_font("ArialUnicode", "", "arialuni.ttf", uni=True)
-            pdf.set_font("ArialUnicode", size=12)
-        except:
-            # Final fallback to Helvetica (will have issues with special chars)
-            pdf.set_font("helvetica", size=12)
-            st.warning("Unicode font not found. Some special characters may not display correctly.")
+    # Set font - using standard Helvetica and cleaning text to avoid Unicode issues
+    pdf.set_font("helvetica", size=12)
     
     # Title
     pdf.set_font(size=16, style="B")
-    pdf.cell(200, 10, txt=clean_text(video_details["title"]), new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
+    title = clean_text(video_details["title"])
+    pdf.cell(200, 10, txt=title, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
     pdf.ln(10)
     
     # Video details
@@ -193,14 +255,14 @@ Views: {video_details["views"]:,}
 Likes: {video_details["likes"]:,}
 Comments: {video_details["comments"]:,}
 """
-    pdf.multi_cell(0, 10, txt=details)
+    pdf.multi_cell(0, 10, txt=clean_text(details))
     pdf.ln(10)
     
     # Summary
     pdf.set_font(size=12, style="B")
     pdf.cell(200, 10, txt="Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font(size=12)
-    pdf.multi_cell(0, 10, txt=summary)
+    pdf.multi_cell(0, 10, txt=clean_text(summary))
     pdf.ln(10)
     
     # Transcription
@@ -213,7 +275,7 @@ Comments: {video_details["comments"]:,}
     transcription_chunks = [transcription[i:i+chunk_size] for i in range(0, len(transcription), chunk_size)]
     
     for chunk in transcription_chunks:
-        pdf.multi_cell(0, 10, txt=chunk)
+        pdf.multi_cell(0, 10, txt=clean_text(chunk))
         pdf.ln(5)
     
     # Save to temporary file
@@ -231,6 +293,7 @@ if url:
     video_id = extract_video_id(url)
     if not video_id:
         st.error("Invalid YouTube URL. Please enter a valid YouTube video URL.")
+        return
     
     with st.spinner("Fetching video details..."):
         video_details = get_video_details(video_id)
@@ -255,7 +318,7 @@ if url:
                 with st.spinner("Transcribing audio..."):
                     transcription = transcribe_audio(audio_path)
                     try:
-                        os.unlink(audio_path)  # Delete temporary audio file
+                        os.unlink(audio_path)
                     except:
                         pass
                 
@@ -274,8 +337,9 @@ if url:
                                 file_name=f"{video_details['title']}_transcription.pdf",
                                 mime="application/pdf"
                             )
+                        
                         try:
-                            os.unlink(pdf_path)  # Delete temporary PDF file
+                            os.unlink(pdf_path)
                         except:
                             pass
                         
@@ -293,10 +357,4 @@ if url:
                 - Video is private or removed
                 - Network restrictions
                 - YouTube is rate limiting our requests (try again later)
-                
-                If the video is age-restricted, you may need to:
-                1. Sign in to YouTube in your browser
-                2. Watch the video once
-                3. Try again with this tool
                 """)
-
