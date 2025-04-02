@@ -293,7 +293,6 @@ if url:
     video_id = extract_video_id(url)
     if not video_id:
         st.error("Invalid YouTube URL. Please enter a valid YouTube video URL.")
-        return
     
     with st.spinner("Fetching video details..."):
         video_details = get_video_details(video_id)
