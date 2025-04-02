@@ -12,7 +12,6 @@ import re
 import yt_dlp
 import logging
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
 import time
 
 # Configure logging
@@ -20,17 +19,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-# Load environment variables
 load_dotenv()
 
 # Gracefully handle missing environment variables
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 if not YOUTUBE_API_KEY:
-    st.error("YouTube API key is missing. Please set it in your environment variables.")
+    st.error("YouTube API key is missing. Please add it to your .env file or Streamlit secrets.")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    st.error("OpenAI API key is missing. Please set it in your environment variables.")
+    st.error("OpenAI API key is missing. Please add it to your .env file or Streamlit secrets.")
 else:
     openai.api_key = OPENAI_API_KEY
 
@@ -55,34 +53,60 @@ def verify_ffmpeg():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-if not verify_ffmpeg():
-    st.warning("FFmpeg is not properly installed. Some audio processing may fail.")
+ffmpeg_available = verify_ffmpeg()
+if not ffmpeg_available:
+    st.warning("FFmpeg is not properly installed. Audio processing will fail.")
     
 # Initialize Whisper model with error handling
 @st.cache_resource
 def load_whisper_model():
     try:
         # Use tiny model for faster transcription and lower memory usage
+        # This is crucial for Streamlit Cloud deployment
         return whisper.load_model("tiny")
     except Exception as e:
         st.error(f"Failed to load Whisper model: {e}")
         logger.error(f"Whisper model error: {str(e)}")
         return None
 
-# Initialize model only when needed
-def get_whisper_model():
-    model = load_whisper_model()
-    if model is None:
-        st.error("Failed to initialize speech recognition model. Please try again later.")
-    return model
+# Load model only once
 model = load_whisper_model()
 
 def clean_text(text):
     """Clean text for PDF generation by removing problematic characters"""
     if not text:
         return ""
-    # Remove all non-ASCII characters
+    # Remove all non-ASCII characters for maximum compatibility
     return text.encode('ascii', 'ignore').decode('ascii').strip()
+
+def convert_to_wav(input_path, output_path=None):
+    """Convert audio file to WAV format using FFmpeg"""
+    if not ffmpeg_available:
+        return None
+        
+    if output_path is None:
+        output_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+    
+    try:
+        subprocess.run([
+            "ffmpeg",
+            "-i", input_path,
+            "-ac", "1",  # Mono audio
+            "-ar", "16000",  # 16kHz sample rate
+            "-y",  # Overwrite without asking
+            output_path
+        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Clean up the original file
+        if input_path != output_path and os.path.exists(input_path):
+            try:
+                os.unlink(input_path)
+            except:
+                pass
+        return output_path
+    except subprocess.CalledProcessError as e:
+        logger.error(f"FFmpeg conversion failed: {e}")
+        return None
 
 def download_youtube_audio(url):
     """Download YouTube audio with improved reliability"""
@@ -91,7 +115,7 @@ def download_youtube_audio(url):
         temp_dir = tempfile.mkdtemp()
         temp_audio_path = os.path.join(temp_dir, "audio.wav")
         
-        # Configure yt-dlp with additional options for reliability
+        # Configure yt-dlp with options for reliability
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
@@ -102,15 +126,8 @@ def download_youtube_audio(url):
             }],
             'quiet': True,
             'no_warnings': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            },
-            'retries': 10,
-            'fragment-retries': 10,
-            'extractor-retries': 3,
+            'retries': 5,
             'socket-timeout': 30,
-            'extract_flat': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -123,73 +140,56 @@ def download_youtube_audio(url):
             # Convert to proper WAV format
             converted_path = convert_to_wav(original_path, temp_audio_path)
             
-            if not os.path.exists(converted_path):
-                return None, f"Converted file not found at {converted_path}"
+            if not converted_path or not os.path.exists(converted_path):
+                return None, f"Audio conversion failed"
             
             return converted_path, None
             
     except Exception as e:
         logger.error(f"Download failed: {e}")
         return None, f"Download failed: {str(e)}"
-        
-def convert_to_wav(input_path, output_path=None):
-    """Convert audio file to WAV format using FFmpeg"""
-    if output_path is None:
-        output_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
-    
-    try:
-        subprocess.run([
-            "ffmpeg",
-            "-i", input_path,
-            "-ac", "1",  # Mono audio
-            "-ar", "16000",  # 16kHz sample rate
-            "-y",  # Overwrite without asking
-            output_path
-        ], check=True)
-        # Clean up the original file
-        if input_path != output_path and os.path.exists(input_path):
-            os.unlink(input_path)
-        return output_path
-    except subprocess.CalledProcessError as e:
-        logger.error(f"FFmpeg conversion failed: {e}")
-        return None
 
 def transcribe_audio(audio_path):
+    """Transcribe audio file using Whisper model"""
     if not audio_path or not os.path.exists(audio_path):
-        st.error(f"Audio file not found at: {audio_path}")
-        return None
+        return None, "Audio file not found"
+    
+    if model is None:
+        return None, "Whisper model failed to load"
     
     try:
-        # Show progress while transcribing
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        # Show progress indicator
+        progress_placeholder = st.empty()
+        progress_placeholder.text("Transcribing audio... This may take a few minutes.")
         
-        def progress_callback(progress):
-            progress_bar.progress(min(progress, 1.0))
-            status_text.text(f"Transcribing... {int(progress*100)}% complete")
-            return True
+        # Perform transcription
+        result = model.transcribe(audio_path)
         
-        # Use ThreadPoolExecutor to run transcription in background
-        with ThreadPoolExecutor() as executor:
-            future = executor.submit(model.transcribe, audio_path, progress_callback=progress_callback)
-            result = future.result()
+        # Clear progress indicator
+        progress_placeholder.empty()
         
-        progress_bar.empty()
-        status_text.empty()
-        return clean_text(result["text"])
+        # Clean up temp file
+        try:
+            os.unlink(audio_path)
+        except:
+            pass
+            
+        return clean_text(result["text"]), None
     except Exception as e:
-        progress_bar.empty()
-        status_text.empty()
-        st.error(f"Error transcribing audio: {e}")
         logger.error(f"Transcription error: {str(e)}")
-        return None
+        return None, f"Transcription failed: {str(e)}"
 
 def extract_video_id(url):
+    """Extract YouTube video ID from URL"""
     regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
     match = re.search(regex, url)
     return match.group(1) if match else None
 
 def get_video_details(video_id):
+    """Get video details from YouTube API"""
+    if not youtube:
+        return None, "YouTube API not initialized"
+        
     try:
         request = youtube.videos().list(
             part="snippet,statistics",
@@ -197,175 +197,250 @@ def get_video_details(video_id):
         )
         response = request.execute()
 
-        if response["items"]:
-            item = response["items"][0]
-            snippet = item["snippet"]
-            statistics = item["statistics"]
-            return {
-                "title": snippet["title"],
-                "channel": snippet["channelTitle"],
-                "published_at": snippet["publishedAt"],
-                "views": int(statistics.get("viewCount", 0)),
-                "likes": int(statistics.get("likeCount", 0)),
-                "comments": int(statistics.get("commentCount", 0)),
-                "description": snippet["description"],
-                "thumbnail": snippet["thumbnails"]["high"]["url"],
-                "video_id": video_id
-            }
-        return None
+        if not response.get("items"):
+            return None, "Video not found or may be private"
+            
+        item = response["items"][0]
+        snippet = item["snippet"]
+        statistics = item["statistics"]
+        
+        return {
+            "title": snippet["title"],
+            "channel": snippet["channelTitle"],
+            "published_at": snippet["publishedAt"],
+            "views": int(statistics.get("viewCount", 0)),
+            "likes": int(statistics.get("likeCount", 0)),
+            "comments": int(statistics.get("commentCount", 0)),
+            "description": snippet["description"],
+            "thumbnail": snippet["thumbnails"]["high"]["url"],
+            "video_id": video_id
+        }, None
     except Exception as e:
-        st.error(f"Error retrieving video details: {e}")
-        return None
+        logger.error(f"Error retrieving video details: {e}")
+        return None, f"Failed to get video details: {str(e)}"
 
 def generate_summary(text):
+    """Generate summary using OpenAI API"""
+    if not OPENAI_API_KEY:
+        return "OpenAI API key not configured", None
+        
     try:
         # Only generate summary if text is long enough
         if len(text.split()) < 100:
-            return "Video content too short for summary"
+            return "Video content too short for summary", None
             
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # Using faster model
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that summarizes video content."},
-                {"role": "user", "content": f"Create a concise summary (about 100 words) of this video:\n\n{text[:3000]}"}  # Limit input size
+                {"role": "user", "content": f"Create a concise summary (about 100 words) of this video transcript if it has less than a thousand words. If it has more than that, create a summary with 500 words:\n\n{text[:4000]}"}
             ],
-            max_tokens=150
+            max_tokens=200
         )
-        return clean_text(response.choices[0].message.content)
+        return clean_text(response.choices[0].message.content), None
     except Exception as e:
-        st.error(f"Error generating summary: {e}")
-        return None
+        logger.error(f"Summary generation error: {str(e)}")
+        return None, f"Failed to generate summary: {str(e)}"
 
-def create_pdf(video_details, transcription, summary):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("helvetica", size=12)
-    
-    # Title
-    pdf.set_font(size=16, style="B")
-    title = clean_text(video_details["title"])
-    pdf.cell(200, 10, txt=title, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
-    pdf.ln(10)
-    
-    # Video details
-    pdf.set_font(size=12, style="B")
-    pdf.cell(200, 10, txt="Video Details", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.set_font(size=12)
-    
-    details = f"""Channel: {clean_text(video_details["channel"])}
-Published: {datetime.datetime.strptime(video_details["published_at"], '%Y-%m-%dT%H:%M:%SZ').strftime('%B %d, %Y')}
+def create_pdf(video_details, transcription, summary=None):
+    """Create PDF with video details, summary, and transcription"""
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("helvetica", size=12)
+        
+        # Title
+        pdf.set_font(size=16, style="B")
+        title = clean_text(video_details["title"])
+        pdf.cell(200, 10, txt=title[:70], new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
+        pdf.ln(10)
+        
+        # Video details
+        pdf.set_font(size=12, style="B")
+        pdf.cell(200, 10, txt="Video Details", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_font(size=12)
+        
+        # Format published date
+        try:
+            published_date = datetime.datetime.strptime(
+                video_details["published_at"], 
+                '%Y-%m-%dT%H:%M:%SZ'
+            ).strftime('%B %d, %Y')
+        except:
+            published_date = video_details["published_at"]
+        
+        details = f"""Channel: {clean_text(video_details["channel"])}
+Published: {published_date}
 Views: {video_details["views"]:,}
 Likes: {video_details["likes"]:,}
 Comments: {video_details["comments"]:,}
 """
-    pdf.multi_cell(0, 10, txt=clean_text(details))
-    pdf.ln(10)
-    
-    # Summary
-    if summary:
-        pdf.set_font(size=12, style="B")
-        pdf.cell(200, 10, txt="Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        pdf.set_font(size=12)
-        pdf.multi_cell(0, 10, txt=clean_text(summary))
+        pdf.multi_cell(0, 10, txt=clean_text(details))
         pdf.ln(10)
-    
-    # Transcription
-    pdf.set_font(size=12, style="B")
-    pdf.cell(200, 10, txt="Full Transcription", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.set_font(size=12)
-    
-    # Split transcription into chunks to avoid memory issues
-    chunk_size = 1000
-    transcription_chunks = [transcription[i:i+chunk_size] for i in range(0, len(transcription), chunk_size)]
-    
-    for chunk in transcription_chunks:
-        pdf.multi_cell(0, 10, txt=clean_text(chunk))
-        pdf.ln(5)
-    
-    # Save to temporary file
-    temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(temp_pdf.name)
-    return temp_pdf.name
+        
+        # Summary (if available)
+        if summary:
+            pdf.set_font(size=12, style="B")
+            pdf.cell(200, 10, txt="Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.set_font(size=12)
+            pdf.multi_cell(0, 10, txt=clean_text(summary))
+            pdf.ln(10)
+        
+        # Transcription
+        pdf.set_font(size=12, style="B")
+        pdf.cell(200, 10, txt="Full Transcription", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_font(size=12)
+        
+        # Split transcription into chunks to avoid memory issues
+        chunk_size = 1000
+        transcription_chunks = [transcription[i:i+chunk_size] for i in range(0, len(transcription), chunk_size)]
+        
+        for chunk in transcription_chunks:
+            pdf.multi_cell(0, 10, txt=clean_text(chunk))
+            pdf.ln(5)
+        
+        # Save to temporary file
+        temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        pdf_path = temp_pdf.name
+        pdf.output(pdf_path)
+        return pdf_path, None
+    except Exception as e:
+        logger.error(f"PDF creation error: {str(e)}")
+        return None, f"Failed to create PDF: {str(e)}"
 
 # Main Streamlit app
-st.title("YouTube Video to PDF Transcriber")
-st.write("Enter a YouTube video URL to generate a PDF with its transcription.")
+def main():
+    st.title("YouTube Video to PDF Transcriber")
+    st.write("Enter a YouTube video URL to generate a PDF with its transcription and summary.")
 
-url = st.text_input("YouTube Video URL:")
+    # Initialize session state for caching results
+    if 'transcription' not in st.session_state:
+        st.session_state.transcription = None
+    if 'summary' not in st.session_state:
+        st.session_state.summary = None
+    if 'pdf_path' not in st.session_state:
+        st.session_state.pdf_path = None
+    if 'video_details' not in st.session_state:
+        st.session_state.video_details = None
+    if 'processing' not in st.session_state:
+        st.session_state.processing = False
 
-if url:
-    video_id = extract_video_id(url)
-    if not video_id:
-        st.error("Invalid YouTube URL. Please enter a valid YouTube video URL.")
-    elif not youtube:
-        st.error("YouTube API not initialized. Please check your API key.")
-    else:
-        with st.spinner("Fetching video details..."):
-            try:
-                video_details = get_video_details(video_id)
-                if not video_details:
-                    st.error("Failed to fetch video details. The video may be private or unavailable.")
-            except Exception as e:
-                st.error(f"Error fetching video details: {str(e)}")
-                video_details = None
-        
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.image(video_details["thumbnail"], width=200)
-    with col2:
-        st.subheader(video_details["title"])
-        st.write(f"**Channel:** {video_details['channel']}")
-        st.write(f"**Published:** {datetime.datetime.strptime(video_details['published_at'], '%Y-%m-%dT%H:%M:%SZ').strftime('%B %d, %Y')}")
-        st.write(f"**Views:** {video_details['views']:,}")
-        st.write(f"**Likes:** {video_details['likes']:,}")
-        st.write(f"**Comments:** {video_details['comments']:,}")
-    
-    if st.button("Generate Transcription PDF"):
-        with st.spinner("Downloading audio (this may take a few minutes)..."):
-            audio_path, error_msg = download_youtube_audio(url)
-        
-        if audio_path:
-            with st.spinner("Transcribing audio..."):
-                transcription = transcribe_audio(audio_path)
-                try:
-                    os.unlink(audio_path)
-                except:
-                    pass
-            
-            if transcription:
-                with st.spinner("Generating summary..."):
-                    summary = generate_summary(transcription)
+    url = st.text_input("YouTube Video URL:")
+
+    if url:
+        video_id = extract_video_id(url)
+        if not video_id:
+            st.error("Invalid YouTube URL. Please enter a valid YouTube video URL.")
+        else:
+            # Fetch video details if not already cached or if URL changed
+            if (not st.session_state.video_details or 
+                st.session_state.video_details.get('video_id') != video_id):
                 
-                if summary:
-                    with st.spinner("Creating PDF..."):
-                        pdf_path = create_pdf(video_details, transcription, summary)
+                with st.spinner("Fetching video details..."):
+                    video_details, error = get_video_details(video_id)
                     
-                    with open(pdf_path, "rb") as f:
+                if video_details:
+                    st.session_state.video_details = video_details
+                else:
+                    st.error(f"Error: {error}")
+            
+            # Display video information
+            if st.session_state.video_details:
+                video_details = st.session_state.video_details
+                
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.image(video_details["thumbnail"], width=200)
+                with col2:
+                    st.subheader(video_details["title"])
+                    st.write(f"**Channel:** {video_details['channel']}")
+                    
+                    # Format the date safely
+                    try:
+                        published_date = datetime.datetime.strptime(
+                            video_details['published_at'], 
+                            '%Y-%m-%dT%H:%M:%SZ'
+                        ).strftime('%B %d, %Y')
+                    except:
+                        published_date = video_details['published_at']
+                        
+                    st.write(f"**Published:** {published_date}")
+                    st.write(f"**Views:** {video_details['views']:,}")
+                    st.write(f"**Likes:** {video_details['likes']:,}")
+                    st.write(f"**Comments:** {video_details['comments']:,}")
+                
+                # Process button
+                if st.button("Generate Transcription PDF"):
+                    st.session_state.processing = True
+                    
+                    # Step 1: Download audio
+                    with st.spinner("Downloading audio (this may take a few minutes)..."):
+                        audio_path, error = download_youtube_audio(url)
+                    
+                    if not audio_path:
+                        st.error(f"Error: {error}")
+                        st.session_state.processing = False
+                    else:
+                        # Step 2: Transcribe audio
+                        with st.spinner("Transcribing audio..."):
+                            transcription, error = transcribe_audio(audio_path)
+                        
+                        if not transcription:
+                            st.error(f"Error: {error}")
+                            st.session_state.processing = False
+                        else:
+                            st.session_state.transcription = transcription
+                            
+                            # Step 3: Generate summary
+                            with st.spinner("Generating summary..."):
+                                summary, error = generate_summary(transcription)
+                            
+                            if not summary and error:
+                                st.warning(f"Summary generation issue: {error}")
+                                # Continue without summary
+                                summary = "Summary generation failed or skipped."
+                            
+                            st.session_state.summary = summary
+                            
+                            # Step 4: Create PDF
+                            with st.spinner("Creating PDF..."):
+                                pdf_path, error = create_pdf(
+                                    video_details, 
+                                    transcription, 
+                                    summary
+                                )
+                            
+                            if not pdf_path:
+                                st.error(f"Error creating PDF: {error}")
+                                st.session_state.processing = False
+                            else:
+                                st.session_state.pdf_path = pdf_path
+                                st.session_state.processing = False
+                
+                # Display results if processing is complete
+                if st.session_state.transcription and st.session_state.pdf_path:
+                    with open(st.session_state.pdf_path, "rb") as f:
                         st.download_button(
                             label="Download PDF",
                             data=f,
-                            file_name=f"{video_details['title']}_transcription.pdf",
+                            file_name=f"{video_details['title'][:30]}_transcription.pdf",
                             mime="application/pdf"
                         )
                     
-                    try:
-                        os.unlink(pdf_path)
-                    except:
-                        pass
-                    
                     st.success("PDF generated successfully!")
-                    st.text_area("Transcription Preview", transcription, height=300)
-                else:
-                    st.error("Failed to generate summary.")
-            else:
-                st.error("Failed to transcribe audio.")
-        else:
-            st.error(f"""
-            Failed to download audio: {error_msg}
-            Possible reasons:
-            - Video is age-restricted
-            - Video is not available in your region
-            - Video is private or removed
-            - Network restrictions
-            - YouTube is rate limiting our requests (try again later)
-            """)
+                    
+                    # Show transcription preview
+                    with st.expander("Transcription Preview"):
+                        st.text_area(
+                            "Transcription", 
+                            st.session_state.transcription, 
+                            height=300
+                        )
+                    
+                    # Show summary if available
+                    if st.session_state.summary:
+                        with st.expander("Summary"):
+                            st.write(st.session_state.summary)
+
+if __name__ == "__main__":
+    main()
