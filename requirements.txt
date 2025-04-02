@@ -1,9 +1,8 @@
-streamlit
-openai==0.28
-pytube
-openai-whisper==20240930
-python-dotenv
-google-api-python-client
-fpdf2==2.7.7
-yt-dlp
-requests
+fpdf2==2.8.2
+google_api_python_client==2.107.0
+openai==0.28.0
+openai_whisper==20240930
+python-dotenv==1.1.0
+pytube==15.0.0
+streamlit==1.35.0
+yt_dlp==2025.3.31
