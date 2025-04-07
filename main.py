@@ -693,15 +693,113 @@ with tab1:
 
 with tab2:
     st.header("Channel Analysis")
-    channel_name = st.text_input("Enter YouTube Channel Name:", key="channel_name")
+    channel_input = st.text_input("Enter YouTube Channel Name or URL:", key="channel_name")
     num_videos = st.slider("Number of recent videos to analyze:", 1, 20, 5)
     
     if st.button("Analyze Channel"):
-        if not channel_name:
-            st.error("Please enter a channel name")
+        if not channel_input:
+            st.error("Please enter a channel name or URL")
         else:
-            with st.spinner(f"Analyzing {channel_name} channel..."):
-                # Step 1: Get channel ID
-                channel_id = get_channel_id(channel_name)
-                if not channel_id:
-                    st.error(f"Channel '{channel_name}' not found.")
+            with st.spinner(f"Analyzing channel..."):
+                try:
+                    # Handle both URL (@handle) and channel name inputs
+                    if "@" in channel_input:
+                        # Extract handle from URL (e.g., https://www.youtube.com/@brazilcryptoreport)
+                        handle = channel_input.split('@')[-1].split('/')[0]
+                        search_query = f"@{handle}"
+                    else:
+                        search_query = channel_input
+                    
+                    # Step 1: Get channel ID
+                    channel_id = get_channel_id(search_query)
+                    if not channel_id:
+                        st.error(f"Channel '{channel_input}' not found. Please check the name/URL and try again.")
+                        st.stop()
+                    
+                    # Get channel stats
+                    st.session_state.channel_stats = get_channel_stats(channel_id)
+                    if not st.session_state.channel_stats:
+                        st.error("Failed to get channel statistics")
+                        st.stop()
+                    
+                    # Get uploads playlist
+                    playlist_id = get_uploads_playlist_id(channel_id)
+                    if not playlist_id:
+                        st.error("Could not find uploads playlist for this channel")
+                        st.stop()
+                    
+                    # Get recent videos
+                    video_ids = get_all_video_ids(playlist_id, num_videos)
+                    if not video_ids:
+                        st.error("No videos found for this channel")
+                        st.stop()
+                    
+                    # Get video details
+                    st.session_state.videos_data = get_video_details_batch(video_ids)
+                    if not st.session_state.videos_data:
+                        st.error("Could not get video details")
+                        st.stop()
+                    
+                    # Process each video (transcript, summary, tags)
+                    progress_bar = st.progress(0)
+                    for i, video in enumerate(st.session_state.videos_data):
+                        progress_bar.progress((i + 1) / len(st.session_state.videos_data))
+                        
+                        # Get transcript
+                        transcript = get_transcript(video['video_id'])
+                        if transcript:
+                            video['transcript'] = transcript
+                            
+                            # Generate summary
+                            summary = summarize_transcription(transcript)
+                            video['summary'] = summary if summary else "No summary available"
+                            
+                            # Generate tags
+                            tags = generate_tags(transcript)
+                            video['tags'] = tags if tags else "No tags generated"
+                    
+                    # Create PDF report
+                    st.session_state.channel_pdf_path = create_channel_pdf(
+                        channel_input,
+                        st.session_state.channel_stats,
+                        st.session_state.videos_data
+                    )
+                    
+                    # Display results
+                    st.success("Channel analysis complete!")
+                    
+                    # Show channel stats
+                    st.subheader("Channel Statistics")
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Subscribers", f"{st.session_state.channel_stats['subscribers']:,}")
+                    col2.metric("Total Views", f"{st.session_state.channel_stats['views']:,}")
+                    col3.metric("Total Videos", f"{st.session_state.channel_stats['videos']:,}")
+                    
+                    # Show video list
+                    st.subheader(f"Recent Videos (Last {num_videos})")
+                    for video in st.session_state.videos_data:
+                        with st.expander(f"{video['title']} - {datetime.datetime.strptime(video['published_at'], '%Y-%m-%dT%H:%M:%SZ').strftime('%b %d, %Y')}"):
+                            col1, col2 = st.columns([1, 3])
+                            with col1:
+                                st.image(video['thumbnail'], width=150)
+                            with col2:
+                                st.write(f"**Views:** {video['views']:,} | **Likes:** {video['likes']:,} | **Comments:** {video['comments']:,}")
+                                if 'summary' in video:
+                                    st.write("**Summary:**")
+                                    st.write(video['summary'])
+                                if 'tags' in video:
+                                    st.write("**Tags:**")
+                                    st.write(video['tags'])
+                    
+                    # Download button
+                    with open(st.session_state.channel_pdf_path, "rb") as f:
+                        st.download_button(
+                            label="Download Full Channel Report",
+                            data=f,
+                            file_name=f"{channel_input}_channel_report.pdf",
+                            mime="application/pdf"
+                        )
+                
+                except Exception as e:
+                    st.error(f"An error occurred during channel analysis: {str(e)}")
+                    logger.error(f"Channel analysis error: {str(e)}")
