@@ -495,12 +495,29 @@ def get_channel_stats(channel_id):
     except Exception as e:
         st.error(f"Error retrieving channel stats: {e}")
         return None
-
+import time
 def get_transcript(video_id):
+    time.sleep(1)
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        output = ' '.join([x['text'] for x in transcript])
-        return clean_text(output)
+        # First try YouTube's official transcript API
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+            return clean_text(' '.join([x['text'] for x in transcript]))
+        except Exception as yt_error:
+            # Fallback to Whisper if YouTube API is blocked
+            st.warning(f"YouTube Transcript API blocked, falling back to audio transcription: {str(yt_error)}")
+            
+            # Download audio
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            audio_path = download_youtube_audio(url)
+            if not audio_path:
+                return None
+                
+            # Transcribe with Whisper
+            result = model.transcribe(audio_path)
+            os.unlink(audio_path)  # Clean up audio file
+            return clean_text(result["text"])
+            
     except Exception as e:
         st.warning(f"Could not get transcript for video {video_id}: {e}")
         return None
@@ -539,62 +556,69 @@ def create_channel_pdf(channel_name, channel_stats, videos_data):
     pdf = FPDF()
     pdf.add_page()
     
-    # Try to add Unicode font
+    # Set smaller margins and font size for narrow content
+    pdf.set_margins(10, 10, 10)  # Left, Top, Right
+    pdf.set_auto_page_break(True, margin=15)
+    
     try:
         pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
-        pdf.set_font("DejaVu", size=12)
+        pdf.set_font("DejaVu", size=10)
     except:
-        pdf.set_font("helvetica", size=12)
+        pdf.set_font("helvetica", size=10)
     
-    # Channel header
-    pdf.set_font(size=16, style="B")
-    pdf.cell(200, 10, txt=f"Channel Report: {channel_name}", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
-    pdf.ln(10)
-    
-    # Channel stats
+    # Title with reduced size
     pdf.set_font(size=12, style="B")
-    pdf.cell(200, 10, txt="Channel Statistics", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.set_font(size=12)
-    
-    stats_text = f"""Subscribers: {channel_stats['subscribers']:,}
-Total Views: {channel_stats['views']:,}
-Total Videos: {channel_stats['videos']:,}
-Report Generated: {channel_stats['timestamp']}
-"""
-    pdf.multi_cell(0, 10, txt=stats_text)
+    title = clean_text(f"Channel Report: {channel_name}")[:90]  # Truncate very long titles
+    pdf.cell(0, 10, txt=title, align='C')
     pdf.ln(10)
     
-    # Videos section
-    pdf.set_font(size=14, style="B")
-    pdf.cell(200, 10, txt="Recent Videos Analysis", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    # Channel stats with simpler formatting
+    pdf.set_font(size=10, style="B")
+    pdf.cell(0, 8, txt="Channel Statistics", ln=1)
+    pdf.set_font(size=10)
+    
+    stats_text = [
+        f"Subscribers: {channel_stats['subscribers']:,}",
+        f"Total Views: {channel_stats['views']:,}",
+        f"Total Videos: {channel_stats['videos']:,}",
+        f"Report Generated: {channel_stats['timestamp']}"
+    ]
+    
+    for line in stats_text:
+        pdf.cell(0, 6, txt=line, ln=1)
+    
     pdf.ln(5)
     
+    # Videos section with more compact formatting
+    pdf.set_font(size=11, style="B")
+    pdf.cell(0, 8, txt="Recent Videos Analysis", ln=1)
+    pdf.ln(3)
+    
     for video in videos_data:
-        pdf.set_font(size=12, style="B")
-        pdf.multi_cell(0, 10, txt=clean_text(video['title']))
-        pdf.set_font(size=10)
+        pdf.set_font(size=10, style="B")
+        title = clean_text(video['title'])[:80]  # Truncate long titles
+        pdf.multi_cell(0, 6, txt=title)
+        pdf.set_font(size=9)
         
-        details = f"""Published: {datetime.datetime.strptime(video['published_at'], '%Y-%m-%dT%H:%M:%SZ').strftime('%B %d, %Y')}
-Views: {video['views']:,} | Likes: {video['likes']:,} | Comments: {video['comments']:,}
-"""
-        pdf.multi_cell(0, 8, txt=details)
+        # More compact details
+        details = f"Published: {datetime.datetime.strptime(video['published_at'], '%Y-%m-%dT%H:%M:%SZ').strftime('%b %d, %Y')} | Views: {video['views']:,} | Likes: {video['likes']:,}"
+        pdf.cell(0, 5, txt=details, ln=1)
         
         if video.get('summary'):
-            pdf.set_font(size=10, style="B")
-            pdf.cell(0, 8, txt="Summary:", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            pdf.set_font(size=10)
-            pdf.multi_cell(0, 8, txt=clean_text(video['summary']))
+            pdf.set_font(size=9, style="B")
+            pdf.cell(0, 5, txt="Summary:", ln=1)
+            pdf.set_font(size=9)
+            pdf.multi_cell(0, 5, txt=clean_text(video['summary']))
         
         if video.get('tags'):
-            pdf.set_font(size=10, style="B")
-            pdf.cell(0, 8, txt="Tags:", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-            pdf.set_font(size=10)
-            pdf.multi_cell(0, 8, txt=clean_text(video['tags']))
+            pdf.set_font(size=9, style="B")
+            pdf.cell(0, 5, txt="Tags:", ln=1)
+            pdf.set_font(size=9)
+            pdf.multi_cell(0, 5, txt=clean_text(video['tags']))
         
-        pdf.ln(5)
-        pdf.set_draw_color(200, 200, 200)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(5)
+        pdf.ln(3)
+        pdf.line(10, pdf.get_y(), pdf.w - 10, pdf.get_y())
+        pdf.ln(3)
     
     # Save to temporary file
     temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -803,3 +827,32 @@ with tab2:
                 except Exception as e:
                     st.error(f"An error occurred during channel analysis: {str(e)}")
                     logger.error(f"Channel analysis error: {str(e)}")
+    if st.session_state.videos_data:
+        for video in st.session_state.videos_data:
+            with st.expander(f"{video['title']}"):
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    st.image(video['thumbnail'], width=150)
+                with col2:
+                    st.write(f"**Published:** {datetime.datetime.strptime(video['published_at'], '%Y-%m-%dT%H:%M:%SZ').strftime('%b %d, %Y')}")
+                    st.write(f"**Views:** {video['views']:,} | **Likes:** {video['likes']:,}")
+                    
+                    if 'transcript' not in video:
+                        st.warning("Could not retrieve transcript (YouTube API blocked)")
+                        if st.button("Try Audio Transcription", key=f"transcribe_{video['video_id']}"):
+                            with st.spinner("Transcribing audio..."):
+                                audio_path = download_youtube_audio(f"https://www.youtube.com/watch?v={video['video_id']}")
+                                if audio_path:
+                                    video['transcript'] = transcribe_audio(audio_path)
+                                    if video['transcript']:
+                                        video['summary'] = summarize_transcription(video['transcript'])
+                                        video['tags'] = generate_tags(video['transcript'])
+                                    os.unlink(audio_path)
+                    
+                    if 'summary' in video:
+                        st.write("**Summary:**")
+                        st.write(video['summary'])
+                    
+                    if 'tags' in video:
+                        st.write("**Tags:**")
+                        st.write(video['tags'])
