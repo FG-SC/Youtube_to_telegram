@@ -5,6 +5,7 @@ python-dotenv==1.0.0
 google-api-python-client==2.108.0
 fpdf2==2.7.7
 yt_dlp>=2025.3.31
+youtube-transcript-api == 1.0.3
 requests==2.31.0
 nest-asyncio
 torch
