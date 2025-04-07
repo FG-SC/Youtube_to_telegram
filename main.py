@@ -601,108 +601,107 @@ Views: {video['views']:,} | Likes: {video['likes']:,} | Comments: {video['commen
     return temp_pdf.name
 
 # Streamlit app
-def main():
-    st.set_page_config(page_title="YouTube Analyzer", layout="wide")
+st.set_page_config(page_title="YouTube Analyzer", layout="wide")
+
+st.title("YouTube Video Analyzer")
+st.write("Analyze individual videos or entire channels")
+
+# Initialize session state variables
+if 'pdf_path' not in st.session_state:
+    st.session_state.pdf_path = None
+if 'transcription' not in st.session_state:
+    st.session_state.transcription = None
+if 'summary' not in st.session_state:
+    st.session_state.summary = None
+if 'video_details' not in st.session_state:
+    st.session_state.video_details = None
+if 'channel_pdf_path' not in st.session_state:
+    st.session_state.channel_pdf_path = None
+if 'videos_data' not in st.session_state:
+    st.session_state.videos_data = None
+if 'channel_stats' not in st.session_state:
+    st.session_state.channel_stats = None
+
+# Create tabs for different functionalities
+tab1, tab2 = st.tabs(["Single Video Analysis", "Channel Analysis"])
+
+with tab1:
+    st.header("Single Video Analysis")
+    url = st.text_input("Enter YouTube Video URL:", key="video_url")
     
-    st.title("YouTube Video Analyzer")
-    st.write("Analyze individual videos or entire channels")
-    
-    # Initialize session state variables
-    if 'pdf_path' not in st.session_state:
-        st.session_state.pdf_path = None
-    if 'transcription' not in st.session_state:
-        st.session_state.transcription = None
-    if 'summary' not in st.session_state:
-        st.session_state.summary = None
-    if 'video_details' not in st.session_state:
-        st.session_state.video_details = None
-    if 'channel_pdf_path' not in st.session_state:
-        st.session_state.channel_pdf_path = None
-    if 'videos_data' not in st.session_state:
-        st.session_state.videos_data = None
-    if 'channel_stats' not in st.session_state:
-        st.session_state.channel_stats = None
-    
-    # Create tabs for different functionalities
-    tab1, tab2 = st.tabs(["Single Video Analysis", "Channel Analysis"])
-    
-    with tab1:
-        st.header("Single Video Analysis")
-        url = st.text_input("Enter YouTube Video URL:", key="video_url")
+    if url:
+        video_id = extract_video_id(url)
+        if not video_id:
+            st.error("Invalid YouTube URL. Please enter a valid YouTube video URL.")
         
-        if url:
-            video_id = extract_video_id(url)
-            if not video_id:
-                st.error("Invalid YouTube URL. Please enter a valid YouTube video URL.")
+        # Only fetch details if we don't have them or URL changed
+        if not st.session_state.video_details or st.session_state.video_details.get('id') != video_id:
+            with st.spinner("Fetching video details..."):
+                st.session_state.video_details = get_video_details(video_id)
+                if st.session_state.video_details:
+                    st.session_state.video_details['id'] = video_id  # Store ID for comparison
+        
+        if st.session_state.video_details:
+            video_details = st.session_state.video_details
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.image(video_details["thumbnail"], width=200)
+            with col2:
+                st.subheader(video_details["title"])
+                st.write(f"**Channel:** {video_details['channel']}")
+                st.write(f"**Published:** {datetime.datetime.strptime(video_details['published_at'], '%Y-%m-%dT%H:%M:%SZ').strftime('%B %d, %Y')}")
+                st.write(f"**Views:** {video_details['views']:,}")
+                st.write(f"**Likes:** {video_details['likes']:,}")
+                st.write(f"**Comments:** {video_details['comments']:,}")
             
-            # Only fetch details if we don't have them or URL changed
-            if not st.session_state.video_details or st.session_state.video_details.get('id') != video_id:
-                with st.spinner("Fetching video details..."):
-                    st.session_state.video_details = get_video_details(video_id)
-                    if st.session_state.video_details:
-                        st.session_state.video_details['id'] = video_id  # Store ID for comparison
-            
-            if st.session_state.video_details:
-                video_details = st.session_state.video_details
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.image(video_details["thumbnail"], width=200)
-                with col2:
-                    st.subheader(video_details["title"])
-                    st.write(f"**Channel:** {video_details['channel']}")
-                    st.write(f"**Published:** {datetime.datetime.strptime(video_details['published_at'], '%Y-%m-%dT%H:%M:%SZ').strftime('%B %d, %Y')}")
-                    st.write(f"**Views:** {video_details['views']:,}")
-                    st.write(f"**Likes:** {video_details['likes']:,}")
-                    st.write(f"**Comments:** {video_details['comments']:,}")
+            if st.button("Generate Transcription PDF"):
+                with st.spinner("Downloading audio..."):
+                    audio_path = download_youtube_audio(url)
                 
-                if st.button("Generate Transcription PDF"):
-                    with st.spinner("Downloading audio..."):
-                        audio_path = download_youtube_audio(url)
+                if audio_path:
+                    with st.spinner("Transcribing audio..."):
+                        st.session_state.transcription = transcribe_audio(audio_path)
+                        try:
+                            os.unlink(audio_path)  # Delete temporary audio file
+                        except:
+                            pass
                     
-                    if audio_path:
-                        with st.spinner("Transcribing audio..."):
-                            st.session_state.transcription = transcribe_audio(audio_path)
-                            try:
-                                os.unlink(audio_path)  # Delete temporary audio file
-                            except:
-                                pass
+                    if st.session_state.transcription:
+                        with st.spinner("Generating summary..."):
+                            st.session_state.summary = generate_summary(st.session_state.transcription)
                         
-                        if st.session_state.transcription:
-                            with st.spinner("Generating summary..."):
-                                st.session_state.summary = generate_summary(st.session_state.transcription)
+                        if st.session_state.summary:
+                            with st.spinner("Creating PDF..."):
+                                st.session_state.pdf_path = create_pdf(video_details, st.session_state.transcription, st.session_state.summary)
                             
-                            if st.session_state.summary:
-                                with st.spinner("Creating PDF..."):
-                                    st.session_state.pdf_path = create_pdf(video_details, st.session_state.transcription, st.session_state.summary)
-                                
-                                # Display the results and buttons
-                                display_results = True
-            
-            # Show results if we have them
-            if st.session_state.pdf_path and st.session_state.transcription and st.session_state.summary:
-                # Display download button
-                with open(st.session_state.pdf_path, "rb") as f:
-                    st.download_button(
-                        label="Download PDF",
-                        data=f,
-                        file_name=f"{video_details['title']}_transcription.pdf",
-                        mime="application/pdf"
-                    )
-                
-                st.success("PDF generated successfully!")
-                st.text_area("Transcription Preview", st.session_state.transcription, height=300)
-    
-    with tab2:
-        st.header("Channel Analysis")
-        channel_name = st.text_input("Enter YouTube Channel Name:", key="channel_name")
-        num_videos = st.slider("Number of recent videos to analyze:", 1, 20, 5)
+                            # Display the results and buttons
+                            display_results = True
         
-        if st.button("Analyze Channel"):
-            if not channel_name:
-                st.error("Please enter a channel name")
-            else:
-                with st.spinner(f"Analyzing {channel_name} channel..."):
-                    # Step 1: Get channel ID
-                    channel_id = get_channel_id(channel_name)
-                    if not channel_id:
-                        st.error(f"Channel '{channel_name}' not found.")
+        # Show results if we have them
+        if st.session_state.pdf_path and st.session_state.transcription and st.session_state.summary:
+            # Display download button
+            with open(st.session_state.pdf_path, "rb") as f:
+                st.download_button(
+                    label="Download PDF",
+                    data=f,
+                    file_name=f"{video_details['title']}_transcription.pdf",
+                    mime="application/pdf"
+                )
+            
+            st.success("PDF generated successfully!")
+            st.text_area("Transcription Preview", st.session_state.transcription, height=300)
+
+with tab2:
+    st.header("Channel Analysis")
+    channel_name = st.text_input("Enter YouTube Channel Name:", key="channel_name")
+    num_videos = st.slider("Number of recent videos to analyze:", 1, 20, 5)
+    
+    if st.button("Analyze Channel"):
+        if not channel_name:
+            st.error("Please enter a channel name")
+        else:
+            with st.spinner(f"Analyzing {channel_name} channel..."):
+                # Step 1: Get channel ID
+                channel_id = get_channel_id(channel_name)
+                if not channel_id:
+                    st.error(f"Channel '{channel_name}' not found.")
