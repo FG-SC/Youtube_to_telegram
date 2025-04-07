@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+st.set_page_config(page_title="YouTube Analyzer", layout="wide")
 
 # Initialize services
 youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=os.getenv("YOUTUBE_API_KEY"))
@@ -601,7 +602,6 @@ Views: {video['views']:,} | Likes: {video['likes']:,} | Comments: {video['commen
     return temp_pdf.name
 
 # Streamlit app
-st.set_page_config(page_title="YouTube Analyzer", layout="wide")
 
 st.title("YouTube Video Analyzer")
 st.write("Analyze individual videos or entire channels")
